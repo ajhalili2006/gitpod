@@ -1,15 +1,9 @@
 packages:
   - name: docker
     type: docker
-    deps:
-      - dev/gpctl:app
-      - dev/kubecdl:app
     argdeps:
       - imageRepoBase
-    srcs:
-      - gcloud-default-config
-      - kubeconfig.yaml
     config:
-      dockerfile: Dockerfile
+      dockerfile: ajhalili2006-experiments.Dockerfile
       image:
-        - ${imageRepoBase}/dev-environment:${version}
+        - ${imageRepoBase}/gp-localapp-glci-builder-devenv:${version}
