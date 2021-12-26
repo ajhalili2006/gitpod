@@ -1,0 +1,22 @@
+devenv:lint:
+  stage: lint
+  script: hadolint dev/image/ajhalili2006-experiments.Dockerfile
+
+devenv:build:
+  needs:
+    - devenv:lint
+  stage: devenv-builder
+  script:
+    - direnv allow
+    - leeway build dev/image:docker -DimageRepoBase=quay.io/ajhalili2006 -Dversion=build-$CI_COMMIT_SHORT_SHA
+    - |
+      docker tag quay.io/ajhalili2006/gp-localapp-glci-builder-devenv:build-$CI_COMMIT_SHORT_SHA quay.io/ajhalili2006/gp-localapp-glci-builder-devenv:latest
+      docker tag quay.io/ajhalili2006/gp-localapp-glci-builder-devenv:build-$CI_COMMIT_SHORT_SHA quay.io/ajhalili2006/gp-localapp-glci-builder-devenv:$CI_COMMIT_REF_SLUG
+    - |
+      docker push quay.io/ajhalili2006/gp-localapp-glci-builder-devenv:$CI_COMMIT_REF_SLUG
+      docker push quay.io/ajhalili2006/gp-localapp-glci-builder-devenv:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: on_success
