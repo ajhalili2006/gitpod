@@ -1,0 +1,8 @@
+#!/usr/bin/bash
+# shellcheck disable=SC2068
+
+if [[ $GITPOD_INSTANCE_ID != "" ]]; then
+  exec uplink --config-dir /workspace/.storj-uplink $@
+else
+  exec uplink $@
+fi
