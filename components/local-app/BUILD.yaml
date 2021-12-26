@@ -6,11 +6,7 @@ packages:
     deps:
       - :app-linux-amd64
       - :app-linux-arm64
-      - :app-darwin-amd64
-      - :app-darwin-arm64
-      - :app-windows-386
-      - :app-windows-amd64
-      - :app-windows-arm64
+      - :app-linux-386
   - name: app-linux-amd64
     type: go
     srcs:
@@ -49,7 +45,7 @@ packages:
       - ["cp", "_deps/components-local-app--version/version.txt", "version.txt"]
     config:
       packaging: app
-  - name: app-darwin-amd64
+  - name: app-linux-386
     type: go
     srcs:
       - go.mod
@@ -62,84 +58,8 @@ packages:
       - components/local-app-api/go:lib
     env:
       - CGO_ENABLED=0
-      - GOOS=darwin
-      - GOARCH=amd64
-    prep:
-      - ["cp", "_deps/components-local-app--version/version.txt", "version.txt"]
-    config:
-      packaging: app
-  - name: app-darwin-arm64
-    type: go
-    srcs:
-      - go.mod
-      - go.sum
-      - "**/*.go"
-    deps:
-      - :version
-      - components/supervisor-api/go:lib
-      - components/gitpod-protocol/go:lib
-      - components/local-app-api/go:lib
-    env:
-      - CGO_ENABLED=0
-      - GOOS=darwin
-      - GOARCH=arm64
-    prep:
-      - ["cp", "_deps/components-local-app--version/version.txt", "version.txt"]
-    config:
-      packaging: app
-  - name: app-windows-amd64
-    type: go
-    srcs:
-      - go.mod
-      - go.sum
-      - "**/*.go"
-    deps:
-      - :version
-      - components/supervisor-api/go:lib
-      - components/gitpod-protocol/go:lib
-      - components/local-app-api/go:lib
-    env:
-      - CGO_ENABLED=0
-      - GOOS=windows
-      - GOARCH=amd64
-    prep:
-      - ["cp", "_deps/components-local-app--version/version.txt", "version.txt"]
-    config:
-      packaging: app
-  - name: app-windows-386
-    type: go
-    srcs:
-      - go.mod
-      - go.sum
-      - "**/*.go"
-    deps:
-      - :version
-      - components/supervisor-api/go:lib
-      - components/gitpod-protocol/go:lib
-      - components/local-app-api/go:lib
-    env:
-      - CGO_ENABLED=0
-      - GOOS=windows
+      - GOOS=linux
       - GOARCH=386
-    prep:
-      - ["cp", "_deps/components-local-app--version/version.txt", "version.txt"]
-    config:
-      packaging: app
-  - name: app-windows-arm64
-    type: go
-    srcs:
-      - go.mod
-      - go.sum
-      - "**/*.go"
-    deps:
-      - :version
-      - components/supervisor-api/go:lib
-      - components/gitpod-protocol/go:lib
-      - components/local-app-api/go:lib
-    env:
-      - CGO_ENABLED=0
-      - GOOS=windows
-      - GOARCH=arm64
     prep:
       - ["cp", "_deps/components-local-app--version/version.txt", "version.txt"]
     config:
@@ -163,5 +83,5 @@ packages:
         VERSION: ${version}
       dockerfile: leeway.Dockerfile
       image:
-        - ${imageRepoBase}/local-app:${version}
-        - ${imageRepoBase}/local-app:commit-${__git_commit}
+        - ${imageRepoBase}/gp-localapp:${version}
+        - ${imageRepoBase}/gp-localapp:commit-${__git_commit}
