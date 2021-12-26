@@ -1,0 +1,3 @@
+include:
+  - local: .gitlab/ci/00-base.gitlab-ci.yml
+  - local: .gitlab/ci/10-devenv.gitlab-ci.yml

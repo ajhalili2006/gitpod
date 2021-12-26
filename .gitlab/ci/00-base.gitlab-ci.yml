@@ -1,4 +1,12 @@
-image: quay.io/ajhalili2006/gp-localapp-glci-builder-devenv:gitlab-cicd
+image: quay.io/ajhalili2006/gp-localapp-glci-builder-devenv
+
+services:
+  - name: docker:dind
+    alias: docker
+
+variables:
+  FF_NETWORK_PER_BUILD: "true"
+  DOCKER_HOST: tcp://docker:2376
 
 stages:
   - lint
