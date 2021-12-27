@@ -6,17 +6,10 @@ FROM alpine:3.15
 
 WORKDIR /app
 COPY components-local-app--app/components-local-app--app-linux-amd64/local-app local-app-linux
-COPY components-local-app--app/components-local-app--app-darwin-amd64/local-app local-app-darwin
-COPY components-local-app--app/components-local-app--app-windows-amd64/local-app.exe local-app-windows.exe
-
 COPY components-local-app--app/components-local-app--app-linux-amd64/local-app local-app-linux-amd64
-COPY components-local-app--app/components-local-app--app-darwin-amd64/local-app local-app-darwin-amd64
-COPY components-local-app--app/components-local-app--app-windows-amd64/local-app.exe local-app-windows-amd64.exe
-
 COPY components-local-app--app/components-local-app--app-linux-arm64/local-app local-app-linux-arm64
-COPY components-local-app--app/components-local-app--app-darwin-arm64/local-app local-app-darwin-arm64
-COPY components-local-app--app/components-local-app--app-windows-arm64/local-app.exe local-app-windows-arm64.exe
-COPY components-local-app--app/components-local-app--app-windows-386/local-app.exe local-app-windows-386.exe
+COPY components-local-app--app/components-local-app--app-linux-arm/local-app local-app-linux-arm
+COPY components-local-app--app/components-local-app--app-linux-386/local-app local-app-linux-386
 
 ARG __GIT_COMMIT
 ARG VERSION
