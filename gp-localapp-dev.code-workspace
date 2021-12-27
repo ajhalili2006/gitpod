@@ -1,0 +1,38 @@
+{
+    "folders": [
+       { "path": "." },
+       { "path": "components/local-app" },
+       { "path": "components/local-app-api" },
+       { "path": "dev/image" },
+       { "path": "scripts" }
+    ],
+    "settings": {
+       "typescript.tsdk": "gitpod/node_modules/typescript/lib",
+       "[json]": {
+          "editor.insertSpaces": true,
+          "editor.tabSize": 2
+       },
+       "[yaml]": {
+          "editor.insertSpaces": true,
+          "editor.tabSize": 2
+       },
+       "[go]": {
+          "editor.formatOnSave": true
+       },
+       "[tf]": {
+          "editor.insertSpaces": true,
+          "editor.tabSize": 2
+       },
+       "go.formatTool": "goimports",
+       "go.useLanguageServer": true,
+       "workspace.supportMultiRootWorkspace": true,
+       "launch": {},
+       "files.exclude": {
+          "**/.git": true
+       },
+       "go.lintTool": "golangci-lint",
+       "gopls": {
+          "allowModfileModifications": true
+       }
+    }
+ }
