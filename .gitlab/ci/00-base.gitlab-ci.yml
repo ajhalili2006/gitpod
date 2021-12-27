@@ -15,4 +15,4 @@ stages:
 
 before_script:
   - ./scripts/docker-cli-login.sh
-  - ./scripts/authenicate-uplink-cli.sh
+  - ./scripts/authenicate-uplink-cli.sh $GP_LOCALAPP_BUCKET_ACCESS_GRANT
