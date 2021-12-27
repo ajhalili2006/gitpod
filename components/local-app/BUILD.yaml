@@ -5,6 +5,7 @@ packages:
       commands: [["echo"]]
     deps:
       - :app-linux-amd64
+      - :app-linux-arm
       - :app-linux-arm64
       - :app-linux-386
   - name: app-linux-amd64
@@ -22,6 +23,25 @@ packages:
       - CGO_ENABLED=0
       - GOOS=linux
       - GOARCH=amd64
+    prep:
+      - ["cp", "_deps/components-local-app--version/version.txt", "version.txt"]
+    config:
+      packaging: app
+  - name: app-linux-arm
+    type: go
+    srcs:
+      - go.mod
+      - go.sum
+      - "**/*.go"
+    deps:
+      - :version
+      - components/supervisor-api/go:lib
+      - components/gitpod-protocol/go:lib
+      - components/local-app-api/go:lib
+    env:
+      - CGO_ENABLED=0
+      - GOOS=linux
+      - GOARCH=arm
     prep:
       - ["cp", "_deps/components-local-app--version/version.txt", "version.txt"]
     config:
