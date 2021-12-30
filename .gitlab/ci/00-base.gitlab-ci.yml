@@ -14,5 +14,5 @@ stages:
   - localapp-cli-crosscomplier
 
 before_script:
-  - ./scripts/docker-cli-login.sh
-  - ./scripts/authenicate-uplink-cli.sh $GP_LOCALAPP_BUCKET_ACCESS_GRANT
+  - ./scripts/docker-cli-login.sh || true
+  - ./scripts/authenicate-uplink-cli.sh $GP_LOCALAPP_BUCKET_ACCESS_GRANT || true

@@ -1,6 +1,11 @@
 #!/usr/bin/bash
 # shellcheck disable=SC2068
 
+if ! command -v uplink; then
+  echo "Storj Uplink CLI is not installed or not in PATH, check https://rtapp.tk/uplink-cli-install for details"
+  exit 1
+fi
+
 if [[ $GITPOD_INSTANCE_ID != "" ]]; then
   exec uplink --config-dir /workspace/.storj-uplink $@
 else

@@ -4,11 +4,11 @@ checkoutLocation: gitpod
 tasks:
   - name: Workspace Prep
     init: |
-      ./scripts/authenicate-uplink-cli.sh
+      ./scripts/authenicate-uplink-cli.sh || true
     before: |
       ./scripts/docker-cli-login.sh || true
       direnv allow
-  - name: Go
+  - name: Golang Deps
     init: direnv reload; leeway exec --filter-type go -v -- go mod verify
     openMode: split-right
 vscode:
