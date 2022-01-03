@@ -1,5 +1,6 @@
 #!/usr/bin/bash
 # shellcheck shell=bash
+set -e
 
 GP_LOCALAPP_BUCKET_ACCESS_GRANT=${GP_LOCALAPP_BUCKET_ACCESS_GRANT:-$1}
 
@@ -8,7 +9,7 @@ if ! command -v uplink>>/dev/null; then
   echo "error: for the install guide."
 fi
 
-if [[ $GITPOD_INSTANCE_ID == "" ]] && [[ $1 == "" ]]; then
+if [[ $GP_LOCALAPP_BUCKET_ACCESS_GRANT == "" ]]; then
   echo "Usage: $0 [STORJ DCS ACCESS GRANT]"
   echo
   echo "Tip: Use GP_LOCALAPP_BUCKET_ACCESS_GRANT variable to set this instead of passing it as an script argument,"
@@ -17,6 +18,8 @@ fi
 
 # TODO: Revisit uplink import help stuff because force flag sunds kinda sussy.
 if [[ $GITPOD_INSTANCE_ID != "" ]]; then
+  echo "info: Refreshing variables before authenicating against Storj Uplink, this should take a while..."
+  eval $(gp env -e)
   "$GITPOD_REPO_ROOT/scripts/gp-uplink" import "$GP_LOCALAPP_BUCKET_ACCESS_GRANT" --force
 else
    uplink import $GP_LOCALAPP_BUCKET_ACCESS_GRANT --force
