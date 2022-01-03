@@ -10,6 +10,10 @@ tasks:
 
       # Tip: Don't rebase, since we neeed to force-push it every time.
       git config --local pull.ff only
+
+      # Allow direnv to eval our envrc file at root
+      direnv allow
+      gp sync-done go-get
     before: |
       # Authenicate the Storj Uplink CLI during workspace startup, ensuring that my keys aren't leaked
       ./scripts/authenicate-uplink-cli.sh || true
@@ -23,7 +27,10 @@ tasks:
       # By the way, fetch everything
       git fetch --all || true
   - name: Golang Deps
-    init: direnv reload; leeway exec --filter-type go -v -- go mod verify
+    init: |
+      gp sync-await go-get
+      direnv reload
+      leeway exec --filter-type go -v -- go mod verify
     openMode: split-right
 vscode:
   extensions:
