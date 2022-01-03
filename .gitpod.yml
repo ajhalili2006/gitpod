@@ -4,10 +4,24 @@ checkoutLocation: gitpod
 tasks:
   - name: Workspace Prep
     init: |
-      ./scripts/authenicate-uplink-cli.sh || true
+      # Add both upstream repo and my GitHub mirror
+      git remote add upstream https://github.com/gitpod-io/gitpod
+      git remote add github https://github.com/ajhalili2006/gp-localapp-glci-builder
+
+      # Tip: Don't rebase, since we neeed to force-push it every time.
+      git config --local pull.ff only
     before: |
+      # Authenicate the Storj Uplink CLI during workspace startup, ensuring that my keys aren't leaked
+      ./scripts/authenicate-uplink-cli.sh || true
+
+      # Make sure Docker CLI is authenicated against RHQCR.
       ./scripts/docker-cli-login.sh || true
+
+      # Allow direnv to eval our envrc file at root
       direnv allow
+
+      # By the way, fetch everything
+      git fetch --all || true
   - name: Golang Deps
     init: direnv reload; leeway exec --filter-type go -v -- go mod verify
     openMode: split-right
