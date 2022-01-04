@@ -16,5 +16,5 @@ git push origin upstream/develop --verbose --progress
 
 echo "====> Synchorizing $FORK_MAIN_BRANCH against upstream..."
 git switch "$FORK_MAIN_BRANCH"
-git pull upstream main --no-rebase --verbose --signoff
-git push origin "$FORK_MAIN_BRANCH"
+git pull upstream main --rebase --verbose --signoff --strategy-option=ours
+git push origin "$FORK_MAIN_BRANCH" --force --verbose --progress
