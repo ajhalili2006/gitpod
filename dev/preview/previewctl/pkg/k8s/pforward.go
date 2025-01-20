@@ -1,6 +1,6 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package k8s
 
@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/cockroachdb/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 )
@@ -32,10 +32,14 @@ func (c *Config) PortForward(ctx context.Context, opts PortForwardOpts) error {
 	}
 
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", opts.Namespace, opts.Name)
-	hostIP := strings.TrimLeft(c.config.Host, "https://")
-	serverURL := url.URL{Scheme: "https", Path: path, Host: hostIP}
+	u, err := url.Parse(c.config.Host)
+	if err != nil {
+		return errors.Wrap(err, "couldn't parse k8s host url")
+	}
+	u.Path = path
+	u.Scheme = "https"
 
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, http.MethodPost, &serverURL)
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, http.MethodPost, u)
 
 	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
 	forwarder, err := portforward.New(dialer, opts.Ports, opts.StopChan, opts.ReadyChan, out, errOut)
@@ -58,4 +62,24 @@ func (c *Config) PortForward(ctx context.Context, opts PortForwardOpts) error {
 	}
 
 	return nil
+}
+
+func (c *Config) GetSVCTargets(ctx context.Context, name, namespace string) ([]string, error) {
+	svc, err := c.CoreClient.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	pods, err := c.CoreClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: metav1.FormatLabelSelector(&metav1.LabelSelector{
+			MatchLabels: svc.Spec.Selector,
+		}),
+	})
+
+	podList := make([]string, 0, len(pods.Items))
+	for _, p := range pods.Items {
+		podList = append(podList, p.Name)
+	}
+
+	return podList, err
 }

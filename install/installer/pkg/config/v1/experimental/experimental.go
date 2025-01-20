@@ -1,6 +1,6 @@
 // Copyright (c) 2021 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 // experimental bundles all internal bits of configuration for which we do not offer
 // support. We use those flags internally to operate SaaS, but do not expect anyone
@@ -15,33 +15,26 @@ import (
 
 	agentSmith "github.com/gitpod-io/gitpod/agent-smith/pkg/config"
 	"github.com/gitpod-io/gitpod/common-go/grpc"
-	"github.com/gitpod-io/gitpod/usage/pkg/db"
+	db "github.com/gitpod-io/gitpod/components/gitpod-db/go"
 	"github.com/gitpod-io/gitpod/ws-daemon/pkg/cpulimit"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Config contains all experimental configuration.
 type Config struct {
 	Workspace  *WorkspaceConfig   `json:"workspace,omitempty"`
 	WebApp     *WebAppConfig      `json:"webapp,omitempty"`
-	IDE        *IDEConfig         `json:"ide,omitempty"`
-	Common     *CommonConfig      `json:"common,omitempty"`
-	Telemetry  *TelemetryConfig   `json:"telemetry,omitempty"`
-	AgentSmith *agentSmith.Config `json:"agentSmith,omitempty"`
-}
-
-type TelemetryConfig struct {
-	Data struct {
-		Platform string `json:"platform"`
-	} `json:"data"`
+	IDE        *IDEConfig         `json:"ide,omitempty"`    // @deprecated
+	Common     *CommonConfig      `json:"common,omitempty"` // @deprecated
+	Overrides  *[]Overrides       `json:"overrides,omitempty"`
+	AgentSmith *agentSmith.Config `json:"agentSmith,omitempty"` // @deprecated
 }
 
 type CommonConfig struct {
-	PodConfig                map[string]*PodConfig `json:"podConfig,omitempty"`
-	StaticMessagebusPassword string                `json:"staticMessagebusPassword"`
-	// @deprecated PodSecurityPolicies are deprecated in k8s 1.21 and removed in 1.25
-	UsePodSecurityPolicies bool `json:"usePodSecurityPolicies"`
+	// Deprecated.
+	PodConfig map[string]*PodConfig `json:"podConfig,omitempty"`
 }
 
 type PodConfig struct {
@@ -62,6 +55,8 @@ type WorkspaceConfig struct {
 	WorkspaceClusterHost     string   `json:"workspaceClusterHost,omitempty"`
 	WorkspaceURLTemplate     string   `json:"workspaceURLTemplate,omitempty"`
 	WorkspacePortURLTemplate string   `json:"workspacePortURLTemplate,omitempty"`
+
+	WorkspaceCIDR string `json:"workspaceCIDR,omitempty"`
 
 	CPULimits struct {
 		Enabled          bool              `json:"enabled"`
@@ -112,7 +107,8 @@ type WorkspaceConfig struct {
 		} `json:"runtime"`
 	} `json:"wsDaemon"`
 
-	WorkspaceClasses map[string]WorkspaceClass `json:"classes,omitempty"`
+	WorkspaceClasses        map[string]WorkspaceClass `json:"classes,omitempty"`
+	PreferredWorkspaceClass string                    `json:"preferredWorkspaceClass,omitempty"`
 
 	WSProxy struct {
 		IngressHeader                              string `json:"ingressHeader"`
@@ -128,25 +124,18 @@ type WorkspaceConfig struct {
 	} `json:"contentService"`
 
 	EnableProtectedSecrets *bool `json:"enableProtectedSecrets"`
-}
 
-type PersistentVolumeClaim struct {
-	// Size is a size of persistent volume claim to use
-	Size resource.Quantity `json:"size" validate:"required"`
-
-	// StorageClass is a storage class of persistent volume claim to use
-	StorageClass string `json:"storageClass"`
-
-	// SnapshotClass is a snapshot class name that is used to create volume snapshot
-	SnapshotClass string `json:"snapshotClass"`
+	ImageBuilderMk3 struct {
+		BaseImageRepositoryName      string `json:"baseImageRepositoryName"`
+		WorkspaceImageRepositoryName string `json:"workspaceImageRepositoryName"`
+	} `json:"imageBuilderMk3"`
 }
 
 type WorkspaceClass struct {
-	Name        string                `json:"name" validate:"required"`
-	Resources   WorkspaceResources    `json:"resources" validate:"required"`
-	Templates   WorkspaceTemplates    `json:"templates,omitempty"`
-	PrebuildPVC PersistentVolumeClaim `json:"prebuildPVC" validate:"required"`
-	PVC         PersistentVolumeClaim `json:"pvc" validate:"required"`
+	Name        string             `json:"name" validate:"required"`
+	Description string             `json:"description"`
+	Resources   WorkspaceResources `json:"resources" validate:"required"`
+	Templates   WorkspaceTemplates `json:"templates,omitempty"`
 }
 
 type WorkspaceResources struct {
@@ -184,19 +173,57 @@ type StripeConfig struct {
 	TeamUsagePriceIDs       StripePriceIDs `json:"teamUsagePriceIds"`
 }
 
+type IAMConfig struct {
+	OIDCClientsSecretName string `json:"oidsClientsConfigSecret,omitempty"`
+}
+
+type SpiceDBConfig struct {
+	Enabled bool `json:"enabled"`
+
+	DisableMigrations bool `json:"disableMigrations"`
+
+	// Reference to a k8s secret which contains a "presharedKey" for authentication with SpiceDB
+	// Required.
+	SecretRef string `json:"secretRef"`
+}
+
+type RedisConfig struct {
+	Address   string `json:"address,omitempty"`
+	Username  string `json:"username,omitempty"`
+	SecretRef string `json:"secretRef,omitempty"`
+}
+
 type WebAppConfig struct {
-	PublicAPI              *PublicAPIConfig       `json:"publicApi,omitempty"`
-	Server                 *ServerConfig          `json:"server,omitempty"`
-	ProxyConfig            *ProxyConfig           `json:"proxy,omitempty"`
-	WorkspaceManagerBridge *WsManagerBridgeConfig `json:"wsManagerBridge,omitempty"`
-	Tracing                *Tracing               `json:"tracing,omitempty"`
-	UsePodAntiAffinity     bool                   `json:"usePodAntiAffinity"`
-	DisableMigration       bool                   `json:"disableMigration"`
-	Usage                  *UsageConfig           `json:"usage,omitempty"`
-	ConfigcatKey           string                 `json:"configcatKey"`
-	WorkspaceClasses       []WebAppWorkspaceClass `json:"workspaceClasses"`
-	Stripe                 *StripeConfig          `json:"stripe,omitempty"`
-	SlowDatabase           bool                   `json:"slowDatabase,omitempty"`
+	PublicAPI *PublicAPIConfig `json:"publicApi,omitempty"`
+
+	// PublicURL lets you override the publically reachable endpoints of gitpod (currently only public api endpoint)
+	// If not set, default will be api.${Domain}
+	PublicURL string `json:"publicUrl,omitempty"`
+
+	Server                       *ServerConfig          `json:"server,omitempty"`
+	ProxyConfig                  *ProxyConfig           `json:"proxy,omitempty"`
+	WorkspaceManagerBridge       *WsManagerBridgeConfig `json:"wsManagerBridge,omitempty"`
+	Tracing                      *Tracing               `json:"tracing,omitempty"`
+	UsePodAntiAffinity           bool                   `json:"usePodAntiAffinity"`
+	DisableMigration             bool                   `json:"disableMigration"`
+	Usage                        *UsageConfig           `json:"usage,omitempty"`
+	ConfigcatKey                 string                 `json:"configcatKey"`
+	WorkspaceClasses             []WebAppWorkspaceClass `json:"workspaceClasses"`
+	Stripe                       *StripeConfig          `json:"stripe,omitempty"`
+	IAM                          *IAMConfig             `json:"iam,omitempty"`
+	SpiceDB                      *SpiceDBConfig         `json:"spicedb,omitempty"`
+	CertmanagerNamespaceOverride string                 `json:"certmanagerNamespaceOverride,omitempty"`
+	Redis                        *RedisConfig           `json:"redis"`
+
+	// ProxySettings is used if the gitpod cell uses some proxy for connectivity
+	ProxySettings *ProxySettings `json:"proxySettings"`
+}
+
+type ProxySettings struct {
+	HttpProxy  string `json:"http_proxy"`
+	HttpsProxy string `json:"https_proxy"`
+	// NoProxy setting should be used for the CIDRs and hostnames that should be not using the proxy URLs
+	NoProxy string `json:"no_proxy"`
 }
 
 type WorkspaceDefaults struct {
@@ -233,17 +260,23 @@ type ServerConfig struct {
 	OAuthServer                       OAuthServer       `json:"oauthServer"`
 	Session                           Session           `json:"session"`
 	GithubApp                         *GithubApp        `json:"githubApp"`
-	ChargebeeSecret                   string            `json:"chargebeeSecret"`
 	StripeSecret                      string            `json:"stripeSecret"`
 	StripeConfig                      string            `json:"stripeConfig"`
+	LinkedInSecret                    string            `json:"linkedInSecret"`
 	DisableDynamicAuthProviderLogin   bool              `json:"disableDynamicAuthProviderLogin"`
 	EnableLocalApp                    *bool             `json:"enableLocalApp"`
 	RunDbDeleter                      *bool             `json:"runDbDeleter"`
 	DisableWorkspaceGarbageCollection bool              `json:"disableWorkspaceGarbageCollection"`
+	DisableCompleteSnapshotJob        bool              `json:"disableCompleteSnapshotJob"`
 	InactivityPeriodForReposInDays    *int              `json:"inactivityPeriodForReposInDays"`
+	// deprecated: use IsDedicatedInstallation instead
+	IsSingleOrgInstallation bool `json:"isSingleOrgInstallation"`
+	IsDedicatedInstallation bool `json:"isDedicatedInstallation"`
 
 	// @deprecated use containerRegistry.privateBaseImageAllowList instead
 	DefaultBaseImageRegistryWhiteList []string `json:"defaultBaseImageRegistryWhitelist"`
+
+	GoogleCloudProfilerEnabled bool `json:"gcpProfilerEnabled,omitempty"`
 }
 
 type ProxyConfig struct {
@@ -254,16 +287,30 @@ type ProxyConfig struct {
 	ServiceType *corev1.ServiceType `json:"serviceType,omitempty" validate:"omitempty,service_config_type"`
 
 	Configcat *ConfigcatProxyConfig `json:"configcat,omitempty"`
+
+	AnalyticsPlugin *AnalyticsPluginConfig `json:"analyticsPlugin,omitempty"`
+
+	FrontendDevEnabled bool `json:"frontendDevEnabled"`
 }
 
 type ConfigcatProxyConfig struct {
-	BaseUrl      string `json:"baseUrl"`
-	PollInterval string `json:"pollInterval"`
+	BaseUrl       string `json:"baseUrl"`
+	PollInterval  string `json:"pollInterval"`
+	FromConfigMap string `json:"fromConfigMap"`
+}
+
+type AnalyticsPluginConfig struct {
+	TrustedSegmentKey   string `json:"trustedSegmentKey"`
+	UntrustedSegmentKey string `json:"untrustedSegmentKey"`
+	SegmentEndpoint     string `json:"segmentEndpoint,omitempty"`
 }
 
 type PublicAPIConfig struct {
 	// Name of the kubernetes secret to use for Stripe secrets
 	StripeSecretName string `json:"stripeSecretName"`
+
+	// Name of the kubernetes secret to use for signature of Personal Access Tokens
+	PersonalAccessTokenSigningKeySecretName string `json:"personalAccessTokenSigningKeySecretName"`
 }
 
 type UsageConfig struct {
@@ -291,6 +338,7 @@ type WorkspaceClassCredits struct {
 	PerMinute float64 `json:"perMinute,omitempty"`
 }
 
+// @deprecated
 type IDEConfig struct {
 	// Disable resolution of latest images and use bundled latest versions instead
 	ResolveLatest    *bool             `json:"resolveLatest,omitempty"`
@@ -299,14 +347,17 @@ type IDEConfig struct {
 	IDEMetricsConfig *IDEMetricsConfig `json:"ideMetrics,omitempty"`
 }
 
+// @deprecated
 type IDEProxyConfig struct {
 	ServiceAnnotations map[string]string `json:"serviceAnnotations"`
 }
 
+// @deprecated
 type IDEMetricsConfig struct {
 	EnabledErrorReporting bool `json:"enabledErrorReporting,omitempty"`
 }
 
+// @deprecated
 type VSXProxyConfig struct {
 	ServiceAnnotations map[string]string `json:"serviceAnnotations"`
 }
@@ -325,3 +376,9 @@ const (
 	TracingSampleTypeRateLimiting  TracingSampleType = "rateLimiting"
 	TracingSampleTypeRemote        TracingSampleType = "remote"
 )
+
+type Overrides struct {
+	metav1.TypeMeta `json:",inline"`
+	Metadata        metav1.ObjectMeta `json:"metadata"`
+	Override        map[string]any    `json:"override"`
+}

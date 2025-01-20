@@ -1,6 +1,6 @@
 // Copyright (c) 2020 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package archive
 
@@ -111,7 +111,6 @@ func ExtractTarbal(ctx context.Context, src io.Reader, dst string, opts ...TarOp
 		"tar",
 		"--extract",
 		"--preserve-permissions",
-		"--xattrs", "--xattrs-include=security.capability",
 	)
 	tarcmd.Dir = dst
 	tarcmd.Stdin = teeReader

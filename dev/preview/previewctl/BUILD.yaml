@@ -7,6 +7,36 @@ packages:
       - "go.sum"
     env:
       - CGO_ENABLED=0
+    deps:
+      - components/common-go:lib
     config:
       packaging: app
-      dontTest: false
+  - name: docker
+    type: docker
+    deps:
+      - :cli
+    argdeps:
+      - version
+      - imageRepoBase
+    config:
+      dockerfile: leeway.Dockerfile
+      image:
+        - ${imageRepoBase}/previewctl:${version}
+        - ${imageRepoBase}/previewctl:hash-${__pkg_version}
+  - name: "install"
+    type: "generic"
+    argdeps:
+      - no-cache
+    deps:
+      - :cli
+    config:
+      commands:
+        - [ "sh", "-c", "mkdir -p /workspace/bin && sudo mv dev-preview-previewctl--cli/previewctl /workspace/bin/previewctl" ]
+        - [ "sh", "-c", "if ! $(grep 'previewctl completion bash' ~/.bashrc > /dev/null); then echo '. <(previewctl completion bash)' >> ~/.bashrc; fi" ]
+        - [ "sh", "-c", "if ! $(grep 'previewctl completion zsh' ~/.zshrc > /dev/null); then echo '. <(previewctl completion zsh)' >> ~/.zshrc; fi" ]
+
+scripts:
+  - name: install
+    description: Build and install previewctl into the current environment
+    script:
+      leeway build dev/preview/previewctl:install -Dno-cache=$RANDOM --dont-test --cache=remote-pull

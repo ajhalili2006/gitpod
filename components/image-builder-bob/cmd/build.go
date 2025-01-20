@@ -1,11 +1,13 @@
 // Copyright (c) 2021 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package cmd
 
 import (
+	"errors"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -32,6 +34,14 @@ var buildCmd = &cobra.Command{
 
 		cfg, err := builder.GetConfigFromEnv()
 		if err != nil {
+			if errors.Is(err, builder.DockerfilePathNotExists) {
+				dockerfilePath := strings.TrimPrefix(os.Getenv("BOB_DOCKERFILE_PATH"), "/workspace/")
+				err = os.WriteFile("/workspace/.gitpod/bob.log", []byte("could not find Dockerfile at \""+dockerfilePath+"\". Please double-check the value specified in image.file in .gitpod.yml"), 0644)
+				if err != nil {
+					log.WithError(err).Error("cannot write init message to /workspace/.gitpod/bob.log")
+				}
+			}
+
 			log.WithError(err).Fatal("cannot get config")
 			return
 		}
@@ -42,6 +52,11 @@ var buildCmd = &cobra.Command{
 		err = b.Build()
 		if err != nil {
 			log.WithError(err).Error("build failed")
+
+			err := os.WriteFile("/workspace/.gitpod/bob.log", []byte(err.Error()), 0644)
+			if err != nil {
+				log.WithError(err).Error("cannot write error to /workspace/.gitpod/bob.log")
+			}
 
 			// make sure we're running long enough to have our logs read
 			if dt := time.Since(t0); dt < 5*time.Second {

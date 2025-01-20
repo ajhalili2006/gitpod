@@ -1,49 +1,57 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package preview
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
-	"strings"
+	"path/filepath"
 	"time"
 
-	"github.com/cockroachdb/errors"
+	"cloud.google.com/go/storage"
 	"github.com/sirupsen/logrus"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/clientcmd/api"
+	"google.golang.org/api/option"
 
 	"github.com/gitpod-io/gitpod/previewctl/pkg/k8s"
 	"github.com/gitpod-io/gitpod/previewctl/pkg/k8s/context/k3s"
 )
 
-var (
-	ErrBranchNotExist = errors.New("branch doesn't exist")
-)
-
-const harvesterContextName = "harvester"
+const TFStateBucket = "5d39183e-preview-tf-state"
 
 type Config struct {
-	branch    string
-	name      string
-	namespace string
+	branch string
+	name   string
 
-	harvesterClient *k8s.Config
-	configLoader    *k3s.ConfigLoader
+	status Status
+
+	previewClient *k8s.Config
+	storageClient *storage.Client
+	configLoader  *k3s.ConfigLoader
 
 	logger *logrus.Entry
 
-	vmiCreationTime *metav1.Time
+	creationTime *time.Time
 }
 
-func New(branch string, logger *logrus.Logger) (*Config, error) {
+type Option func(opts *Config)
+
+func WithServiceAccountPath(serviceAccountPath string) Option {
+	return func(config *Config) {
+		if serviceAccountPath == "" {
+			return
+		}
+		storageClient, err := storage.NewClient(context.Background(), option.WithCredentialsFile(serviceAccountPath))
+		if err != nil {
+			return
+		}
+		config.storageClient = storageClient
+	}
+}
+
+func New(branch string, logger *logrus.Logger, opts ...Option) (*Config, error) {
 	branch, err := GetName(branch)
 	if err != nil {
 		return nil, err
@@ -51,99 +59,30 @@ func New(branch string, logger *logrus.Logger) (*Config, error) {
 
 	logEntry := logger.WithFields(logrus.Fields{"branch": branch})
 
-	harvesterConfig, err := k8s.NewFromDefaultConfigWithContext(logEntry.Logger, harvesterContextName)
-	if err != nil {
-		return nil, errors.Wrap(err, "couldn't instantiate a k8s config")
+	config := &Config{
+		branch: branch,
+		name:   branch,
+		status: Status{
+			Name: branch,
+		},
+		logger:       logEntry,
+		creationTime: nil,
+	}
+	for _, o := range opts {
+		o(config)
+	}
+	if config.storageClient == nil {
+		config.storageClient, err = storage.NewClient(context.Background())
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return &Config{
-		branch:          branch,
-		namespace:       fmt.Sprintf("preview-%s", branch),
-		name:            branch,
-		harvesterClient: harvesterConfig,
-		logger:          logEntry,
-		vmiCreationTime: nil,
-	}, nil
+	return config, nil
+
 }
 
-type InstallCtxOpts struct {
-	Wait              bool
-	Timeout           time.Duration
-	KubeSavePath      string
-	SSHPrivateKeyPath string
-}
-
-func (c *Config) InstallContext(ctx context.Context, opts InstallCtxOpts) error {
-	// TODO: https://github.com/gitpod-io/ops/issues/6524
-	if c.configLoader == nil {
-		configLoader, err := k3s.New(ctx, k3s.ConfigLoaderOpts{
-			Logger:            c.logger.Logger,
-			PreviewName:       c.name,
-			PreviewNamespace:  c.namespace,
-			SSHPrivateKeyPath: opts.SSHPrivateKeyPath,
-			SSHUser:           "ubuntu",
-		})
-
-		if err != nil {
-			return err
-		}
-
-		c.configLoader = configLoader
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
-
-	c.logger.WithFields(logrus.Fields{"timeout": opts.Timeout}).Debug("Installing context")
-
-	// we use this channel to signal when we've found an event in wait functions, so we know when we're done
-	doneCh := make(chan struct{})
-	defer close(doneCh)
-
-	err := c.harvesterClient.GetVMStatus(ctx, c.name, c.namespace)
-	if err != nil && !errors.Is(err, k8s.ErrVmNotReady) {
-		return err
-	} else if errors.Is(err, k8s.ErrVmNotReady) && !opts.Wait {
-		return err
-	} else if errors.Is(err, k8s.ErrVmNotReady) && opts.Wait {
-		err = c.harvesterClient.WaitVMReady(ctx, c.name, c.namespace, doneCh)
-		if err != nil {
-			return err
-		}
-	}
-
-	err = c.harvesterClient.GetProxyVMServiceStatus(ctx, c.namespace)
-	if err != nil && !errors.Is(err, k8s.ErrSvcNotReady) {
-		return err
-	} else if errors.Is(err, k8s.ErrSvcNotReady) && !opts.Wait {
-		return err
-	} else if errors.Is(err, k8s.ErrSvcNotReady) && opts.Wait {
-		err = c.harvesterClient.WaitProxySvcReady(ctx, c.namespace, doneCh)
-		if err != nil {
-			return err
-		}
-	}
-
-	if opts.Wait {
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.Tick(5 * time.Second):
-				c.logger.Infof("waiting for context install to succeed")
-				err = c.Install(ctx, opts)
-				if err == nil {
-					c.logger.Infof("Successfully installed context")
-					return nil
-				}
-			}
-		}
-	}
-
-	return c.Install(ctx, opts)
-}
-
-// Same compares two preview envrionments
+// Same compares two preview environments
 //
 // Config environments are considered the same if they are based on the same underlying
 // branch and the VM hasn't changed.
@@ -153,46 +92,37 @@ func (c *Config) Same(newPreview *Config) bool {
 		return false
 	}
 
-	ensureVMICreationTime(c)
-	ensureVMICreationTime(newPreview)
+	c.ensureCreationTime()
+	newPreview.ensureCreationTime()
 
-	return c.vmiCreationTime.Equal(newPreview.vmiCreationTime)
+	if c.creationTime == nil {
+		return false
+	}
+
+	return c.creationTime.Equal(*newPreview.creationTime)
 }
 
-func ensureVMICreationTime(c *Config) {
+// ensureCreationTime best-effort guess on when the preview got created, based on the creation timestamp of the service
+func (c *Config) ensureCreationTime() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if c.vmiCreationTime == nil {
-		creationTime, err := c.harvesterClient.GetVMICreationTimestamp(ctx, c.name, c.namespace)
-		c.vmiCreationTime = creationTime
+	if c.creationTime == nil {
+		attr, err := c.storageClient.Bucket(TFStateBucket).Object("preview/" + c.name + ".tfstate").Attrs(ctx)
 		if err != nil {
 			c.logger.WithFields(logrus.Fields{"err": err}).Infof("Failed to get creation time")
+			return
 		}
+		c.creationTime = &attr.Created
 	}
 }
 
-func (c *Config) Install(ctx context.Context, opts InstallCtxOpts) error {
-	cfg, err := c.GetPreviewContext(ctx)
-	if err != nil {
-		return err
-	}
-
-	merged, err := k8s.MergeContextsWithDefault(cfg)
-	if err != nil {
-		return err
-	}
-
-	return k8s.OutputContext(opts.KubeSavePath, merged)
+func (c *Config) GetName() string {
+	return c.name
 }
 
-func (c *Config) GetPreviewContext(ctx context.Context) (*api.Config, error) {
-	return c.configLoader.Load(ctx)
-}
-
-func InstallVMSSHKeys() error {
-	// TODO: https://github.com/gitpod-io/ops/issues/6524
-	return exec.Command("bash", "/workspace/gitpod/dev/preview/util/install-vm-ssh-keys.sh").Run()
+func GenerateSSHPrivateKey(path string) error {
+	return exec.Command("ssh-keygen", "-t", "ed25519", "-q", "-N", "", "-f", path).Run()
 }
 
 func SSHPreview(branch string) error {
@@ -200,7 +130,9 @@ func SSHPreview(branch string) error {
 	if err != nil {
 		return err
 	}
-	sshCommand := exec.Command("bash", "/workspace/gitpod/dev/preview/ssh-vm.sh", "-b", branch)
+
+	path := filepath.Join(os.Getenv("LEEWAY_WORKSPACE_ROOT"), "dev/preview/ssh-vm.sh")
+	sshCommand := exec.Command("bash", path, "-b", branch)
 
 	// We need to bind standard output files to the command
 	// otherwise 'previewctl' will exit as soon as the script is run.
@@ -209,62 +141,4 @@ func SSHPreview(branch string) error {
 	sshCommand.Stdout = os.Stdout
 
 	return sshCommand.Run()
-}
-
-func branchFromGit(branch string) (string, error) {
-	if branch == "" {
-		out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
-		if err != nil {
-			return "", errors.Wrap(err, "Could not retrieve branch name.")
-		}
-
-		branch = string(out)
-	} else {
-		_, err := exec.Command("git", "rev-parse", "--verify", branch).Output()
-		if err != nil {
-			return "", errors.CombineErrors(err, ErrBranchNotExist)
-		}
-	}
-
-	return branch, nil
-}
-
-func GetName(branch string) (string, error) {
-	var err error
-	if branch == "" {
-		branch, err = branchFromGit(branch)
-		if err != nil {
-			return "", err
-		}
-	}
-
-	branch = strings.TrimSpace(branch)
-	withoutRefsHead := strings.Replace(branch, "/refs/heads/", "", 1)
-	lowerCased := strings.ToLower(withoutRefsHead)
-
-	var re = regexp.MustCompile(`[^-a-z0-9]`)
-	sanitizedBranch := re.ReplaceAllString(lowerCased, `$1-$2`)
-
-	if len(sanitizedBranch) > 20 {
-		h := sha256.New()
-		h.Write([]byte(sanitizedBranch))
-		hashedBranch := hex.EncodeToString(h.Sum(nil))
-
-		sanitizedBranch = sanitizedBranch[0:10] + hashedBranch[0:10]
-	}
-
-	return sanitizedBranch, nil
-}
-
-func (c *Config) ListAllPreviews(ctx context.Context) error {
-	previews, err := c.harvesterClient.GetVMs(ctx)
-	if err != nil {
-		return err
-	}
-
-	for _, preview := range previews {
-		fmt.Printf("%v\n", preview)
-	}
-
-	return nil
 }

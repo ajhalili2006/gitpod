@@ -1,30 +1,60 @@
 /**
  * Copyright (c) 2022 Gitpod GmbH. All rights reserved.
  * Licensed under the GNU Affero General Public License (AGPL).
- * See License-AGPL.txt in the project root for license information.
+ * See License.AGPL.txt in the project root for license information.
  */
 
-import { JetBrainsConfig, TaskConfig, Workspace } from "@gitpod/gitpod-protocol";
-import { IDEOptions, IDEClient } from "@gitpod/gitpod-protocol/lib/ide-protocol";
-import { IDEServiceClient, IDEServiceDefinition } from "@gitpod/ide-service-api/lib/ide.pb";
+import { IDESettings, User, Workspace } from "@gitpod/gitpod-protocol";
+import { IDEClient, IDEOption, IDEOptions, IDESettingsVersion } from "@gitpod/gitpod-protocol/lib/ide-protocol";
+import * as IdeServiceApi from "@gitpod/ide-service-api/lib/ide.pb";
+import {
+    IDEServiceClient,
+    IDEServiceDefinition,
+    ResolveWorkspaceConfigResponse,
+} from "@gitpod/ide-service-api/lib/ide.pb";
+import { getPrimaryEmail } from "@gitpod/public-api-common/lib/user-utils";
 import { inject, injectable } from "inversify";
+import { AuthorizationService } from "./user/authorization-service";
+import { ApplicationError, ErrorCodes } from "@gitpod/gitpod-protocol/lib/messaging/error";
+
+interface IDEVersion {
+    version: string;
+    image: string;
+    imageLayers?: string[];
+}
+
+interface ExtendedIDEOption extends Omit<IDEOption, "pinnable"> {
+    versions?: IDEVersion[];
+}
+
+interface ExtendedIDEOptions extends Omit<IDEOptions, "options"> {
+    options: { [key: string]: ExtendedIDEOption };
+}
+
+export interface ExtendedIDESettings extends IDESettings {
+    pinnedIDEversions?: { [key: string]: string };
+}
 
 export interface IDEConfig {
     supervisorImage: string;
-    ideOptions: IDEOptions;
+    ideOptions: ExtendedIDEOptions;
     clients?: { [id: string]: IDEClient };
 }
+
 @injectable()
 export class IDEService {
     @inject(IDEServiceDefinition.name)
     protected readonly ideService: IDEServiceClient;
 
+    @inject(AuthorizationService)
+    protected readonly authService: AuthorizationService;
+
     private cacheConfig?: IDEConfig;
 
-    async getIDEConfig(): Promise<IDEConfig> {
+    async getIDEConfig(request: { user: { id: string; email?: string } }): Promise<IDEConfig> {
         try {
-            let resp = await this.ideService.getConfig({});
-            let config: IDEConfig = JSON.parse(resp.content);
+            const response = await this.ideService.getConfig(request);
+            const config: IDEConfig = JSON.parse(response.content);
             this.cacheConfig = config;
             return config;
         } catch (e) {
@@ -37,83 +67,118 @@ export class IDEService {
         }
     }
 
-    resolveGitpodTasks(ws: Workspace): TaskConfig[] {
-        const tasks: TaskConfig[] = [];
-        if (ws.config.tasks) {
-            tasks.push(...ws.config.tasks);
+    async isIDEAvailable(ide: string, request: { user: { id: string; email?: string } }): Promise<boolean> {
+        if (!ide) {
+            return false;
         }
-        // TODO(ak) it is a hack to get users going, we should rather layer JB products on prebuild workspaces and move logic to corresponding images
-        if (ws.type === "prebuild" && ws.config.jetbrains) {
-            let warmUp = "";
-            for (const key in ws.config.jetbrains) {
-                let productCode;
-                if (key === "intellij") {
-                    productCode = "IIU";
-                } else if (key === "goland") {
-                    productCode = "GO";
-                } else if (key === "pycharm") {
-                    productCode = "PCP";
-                } else if (key === "phpstorm") {
-                    productCode = "PS";
-                } else if (key === "rubymine") {
-                    productCode = "RM";
-                } else if (key === "webstorm") {
-                    productCode = "WS";
-                }
-                const prebuilds = productCode && ws.config.jetbrains[key as keyof JetBrainsConfig]?.prebuilds;
-                if (prebuilds) {
-                    warmUp +=
-                        prebuilds.version === "latest"
-                            ? ""
-                            : `
-echo 'warming up stable release of ${key}...'
-echo 'downloading stable ${key} backend...'
-mkdir /tmp/backend
-curl -sSLo /tmp/backend/backend.tar.gz "https://download.jetbrains.com/product?type=release&distribution=linux&code=${productCode}"
-tar -xf /tmp/backend/backend.tar.gz --strip-components=1 --directory /tmp/backend
+        const config = await this.getIDEConfig({ user: request.user });
+        return Object.keys(config.ideOptions.options).includes(ide);
+    }
 
-echo 'configuring JB system config and caches aligned with runtime...'
-printf '\nshared.indexes.download.auto.consent=true' >> "/tmp/backend/bin/idea.properties"
-unset JAVA_TOOL_OPTIONS
-export IJ_HOST_CONFIG_BASE_DIR=/workspace/.config/JetBrains
-export IJ_HOST_SYSTEM_BASE_DIR=/workspace/.cache/JetBrains
-
-echo 'running stable ${key} backend in warmup mode...'
-/tmp/backend/bin/remote-dev-server.sh warmup "$GITPOD_REPO_ROOT"
-
-echo 'removing stable ${key} backend...'
-rm -rf /tmp/backend
-`;
-                    warmUp +=
-                        prebuilds.version === "stable"
-                            ? ""
-                            : `
-echo 'warming up latest release of ${key}...'
-echo 'downloading latest ${key} backend...'
-mkdir /tmp/backend-latest
-curl -sSLo /tmp/backend-latest/backend-latest.tar.gz "https://download.jetbrains.com/product?type=release,eap,rc&distribution=linux&code=${productCode}"
-tar -xf /tmp/backend-latest/backend-latest.tar.gz --strip-components=1 --directory /tmp/backend-latest
-
-echo 'configuring JB system config and caches aligned with runtime...'
-printf '\nshared.indexes.download.auto.consent=true' >> "/tmp/backend-latest/bin/idea.properties"
-unset JAVA_TOOL_OPTIONS
-export IJ_HOST_CONFIG_BASE_DIR=/workspace/.config/JetBrains-latest
-export IJ_HOST_SYSTEM_BASE_DIR=/workspace/.cache/JetBrains-latest
-
-echo 'running ${key} backend in warmup mode...'
-/tmp/backend-latest/bin/remote-dev-server.sh warmup "$GITPOD_REPO_ROOT"
-
-echo 'removing latest ${key} backend...'
-rm -rf /tmp/backend-latest
-`;
-                }
+    migrateSettings(user: User): IDESettings | undefined {
+        if (
+            !user?.additionalData?.ideSettings ||
+            user.additionalData.ideSettings.settingVersion === IDESettingsVersion
+        ) {
+            return undefined;
+        }
+        const newIDESettings: IDESettings = {
+            settingVersion: IDESettingsVersion,
+        };
+        const ideSettings = user.additionalData.ideSettings;
+        if (ideSettings.useDesktopIde) {
+            if (ideSettings.defaultDesktopIde === "code-desktop") {
+                newIDESettings.defaultIde = "code-desktop";
+            } else if (ideSettings.defaultDesktopIde === "code-desktop-insiders") {
+                newIDESettings.defaultIde = "code-desktop";
+                newIDESettings.useLatestVersion = true;
+            } else {
+                newIDESettings.defaultIde = ideSettings.defaultDesktopIde;
+                newIDESettings.useLatestVersion = ideSettings.useLatestVersion;
             }
-            if (warmUp) {
-                tasks.push({
-                    init: warmUp.trim(),
-                });
+        } else {
+            const useLatest = ideSettings.defaultIde === "code-latest";
+            newIDESettings.defaultIde = "code";
+            newIDESettings.useLatestVersion = useLatest;
+        }
+
+        if (ideSettings.defaultIde && !this.isIDEAvailable(ideSettings.defaultIde, { user })) {
+            ideSettings.defaultIde = "code";
+        }
+        return newIDESettings;
+    }
+
+    async resolveWorkspaceConfig(
+        workspace: Workspace,
+        user: User,
+        userSelectedIdeSettings?: ExtendedIDESettings,
+    ): Promise<ResolveWorkspaceConfigResponse> {
+        const workspaceType =
+            workspace.type === "prebuild" ? IdeServiceApi.WorkspaceType.PREBUILD : IdeServiceApi.WorkspaceType.REGULAR;
+
+        // in case users have `auto-start` options set
+        if (userSelectedIdeSettings?.defaultIde && !this.isIDEAvailable(userSelectedIdeSettings.defaultIde, { user })) {
+            userSelectedIdeSettings.defaultIde = "code";
+        }
+
+        const req: IdeServiceApi.ResolveWorkspaceConfigRequest = {
+            type: workspaceType,
+            context: JSON.stringify(workspace.context),
+            ideSettings: JSON.stringify({ ...user.additionalData?.ideSettings, ...userSelectedIdeSettings }),
+            workspaceConfig: JSON.stringify(workspace.config),
+            user: {
+                id: user.id,
+                email: getPrimaryEmail(user),
+            },
+        };
+
+        for (let attempt = 0; attempt < 15; attempt++) {
+            if (attempt != 0) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+            }
+            try {
+                return await this.ideService.resolveWorkspaceConfig(req);
+            } catch (e) {
+                console.error("ide-service: failed to resolve workspace config: ", e);
             }
         }
-        return tasks;
+        throw new Error("failed to resolve workspace IDE configuration");
+    }
+
+    async getIDEVersions(
+        ide: string,
+        request: { user: { id: string; email?: string } },
+    ): Promise<string[] | undefined> {
+        const config = await this.getIDEConfig(request);
+        if (!config) {
+            return undefined;
+        }
+
+        const ideOption: ExtendedIDEOption | undefined = config.ideOptions.options[ide];
+        if (!ideOption?.versions || ideOption.versions.length === 0) {
+            return undefined;
+        }
+
+        return ideOption.versions.map((v) => v.version);
+    }
+
+    async checkEditorsAllowed(userId: string, editorNames: string[]) {
+        const allEditors = await this.getIDEConfig({ user: { id: userId } }).then((d) =>
+            Object.keys(d.ideOptions.options),
+        );
+        const notAllowedList = editorNames.filter((e) => !allEditors.includes(e as string));
+        if (notAllowedList.length > 0) {
+            if (notAllowedList.length === 1) {
+                throw new ApplicationError(
+                    ErrorCodes.BAD_REQUEST,
+                    `editor ${notAllowedList[0]} is not allowed in installation`,
+                );
+            } else {
+                throw new ApplicationError(
+                    ErrorCodes.BAD_REQUEST,
+                    `editors ${notAllowedList.join(",")} are not allowed in installation`,
+                );
+            }
+        }
     }
 }

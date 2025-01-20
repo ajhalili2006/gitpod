@@ -1,6 +1,6 @@
 // Copyright (c) 2020 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package initializer
 
@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,12 +58,17 @@ type GitInitializer struct {
 }
 
 // Run initializes the workspace using Git
-func (ws *GitInitializer) Run(ctx context.Context, mappings []archive.IDMapping) (src csapi.WorkspaceInitSource, err error) {
+func (ws *GitInitializer) Run(ctx context.Context, mappings []archive.IDMapping) (src csapi.WorkspaceInitSource, stats csapi.InitializerMetrics, err error) {
 	isGitWS := git.IsWorkingCopy(ws.Location)
 	//nolint:ineffassign
 	span, ctx := opentracing.StartSpanFromContext(ctx, "GitInitializer.Run")
 	span.SetTag("isGitWS", isGitWS)
 	defer tracing.FinishSpan(span, &err)
+	start := time.Now()
+	initialSize, fsErr := getFsUsage()
+	if fsErr != nil {
+		log.WithError(fsErr).Error("could not get disk usage")
+	}
 
 	src = csapi.WorkspaceInitFromOther
 	if isGitWS {
@@ -105,9 +111,16 @@ func (ws *GitInitializer) Run(ctx context.Context, mappings []archive.IDMapping)
 			return err
 		}
 
+		// we can only do `git config` stuffs after having a directory that is also git init'd
+		// commit-graph after every git fetch command that downloads a pack-file from a remote
+		err = ws.Git(ctx, "config", "fetch.writeCommitGraph", "true")
+		if err != nil {
+			log.WithError(err).WithField("location", ws.Location).Error("cannot configure fetch.writeCommitGraph")
+		}
+
 		err = ws.Git(ctx, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 		if err != nil {
-			log.WithError(err).WithField("location", ws.Location).Error("cannot configure fecth behavior")
+			log.WithError(err).WithField("location", ws.Location).Error("cannot configure fetch behavior")
 		}
 
 		err = ws.Git(ctx, "config", "--replace-all", "checkout.defaultRemote", "origin")
@@ -137,7 +150,7 @@ func (ws *GitInitializer) Run(ctx context.Context, mappings []archive.IDMapping)
 	b.MaxElapsedTime = 5 * time.Minute
 	if err = backoff.RetryNotify(gitClone, b, onGitCloneFailure); err != nil {
 		err = checkGitStatus(err)
-		return src, xerrors.Errorf("git initializer gitClone: %w", err)
+		return src, nil, xerrors.Errorf("git initializer gitClone: %w", err)
 	}
 
 	defer func() {
@@ -161,17 +174,44 @@ func (ws *GitInitializer) Run(ctx context.Context, mappings []archive.IDMapping)
 	}()
 
 	if err := ws.realizeCloneTarget(ctx); err != nil {
-		return src, xerrors.Errorf("git initializer clone: %w", err)
+		return src, nil, xerrors.Errorf("git initializer clone: %w", err)
 	}
 	if err := ws.UpdateRemote(ctx); err != nil {
-		return src, xerrors.Errorf("git initializer updateRemote: %w", err)
+		return src, nil, xerrors.Errorf("git initializer updateRemote: %w", err)
 	}
 	if err := ws.UpdateSubmodules(ctx); err != nil {
 		log.WithError(err).Warn("error while updating submodules - continuing")
 	}
 
 	log.WithField("stage", "init").WithField("location", ws.Location).Debug("Git operations complete")
+
+	if fsErr == nil {
+		currentSize, fsErr := getFsUsage()
+		if fsErr != nil {
+			log.WithError(fsErr).Error("could not get disk usage")
+		}
+
+		stats = csapi.InitializerMetrics{csapi.InitializerMetric{
+			Type:     "git",
+			Duration: time.Since(start),
+			Size:     currentSize - initialSize,
+		}}
+	}
 	return
+}
+
+func (ws *GitInitializer) isShallowRepository(ctx context.Context) bool {
+	out, err := ws.GitWithOutput(ctx, nil, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		log.WithError(err).Error("unexpected error checking if git repository is shallow")
+		return true
+	}
+	isShallow, err := strconv.ParseBool(strings.TrimSpace(string(out)))
+	if err != nil {
+		log.WithError(err).WithField("input", string(out)).Error("unexpected error parsing bool")
+		return true
+	}
+	return isShallow
 }
 
 // realizeCloneTarget ensures the clone target is checked out
@@ -210,8 +250,13 @@ func (ws *GitInitializer) realizeCloneTarget(ctx context.Context) (err error) {
 		//
 		// We don't recurse submodules because callers realizeCloneTarget() are expected to update submodules explicitly,
 		// and deal with any error appropriately (i.e. emit a warning rather than fail).
-		if err := ws.Git(ctx, "fetch", "--depth=1", "origin", "--recurse-submodules=no", ws.CloneTarget); err != nil {
-			log.WithError(err).WithField("remoteURI", ws.RemoteURI).WithField("branch", ws.CloneTarget).Error("Cannot fetch remote branch")
+		fetchArgs := []string{"--depth=1", "origin", "--recurse-submodules=no", ws.CloneTarget}
+		isShallow := ws.isShallowRepository(ctx)
+		if !isShallow {
+			fetchArgs = []string{"origin", "--recurse-submodules=no", ws.CloneTarget}
+		}
+		if err := ws.Git(ctx, "fetch", fetchArgs...); err != nil {
+			log.WithError(err).WithField("isShallow", isShallow).WithField("remoteURI", ws.RemoteURI).WithField("branch", ws.CloneTarget).Error("Cannot fetch remote branch")
 			return err
 		}
 

@@ -1,32 +1,25 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package apiv1
 
 import (
-	"fmt"
 	"time"
 
-	"github.com/gitpod-io/gitpod/usage/pkg/db"
+	"github.com/gitpod-io/gitpod/common-go/log"
+	db "github.com/gitpod-io/gitpod/components/gitpod-db/go"
 )
 
 const (
-	defaultWorkspaceClass = "default"
+	defaultPrice = float64(1) / float64(6)
 )
 
 var (
-	DefaultWorkspacePricer, _ = NewWorkspacePricer(map[string]float64{
-		// 1 credit = 6 minutes
-		"default": float64(1) / float64(6),
-	})
+	DefaultWorkspacePricer, _ = NewWorkspacePricer(map[string]float64{})
 )
 
 func NewWorkspacePricer(creditMinutesByWorkspaceClass map[string]float64) (*WorkspacePricer, error) {
-	if _, ok := creditMinutesByWorkspaceClass[defaultWorkspaceClass]; !ok {
-		return nil, fmt.Errorf("credits per minute not defined for expected workspace class 'default'")
-	}
-
 	return &WorkspacePricer{creditMinutesByWorkspaceClass: creditMinutesByWorkspaceClass}, nil
 }
 
@@ -36,11 +29,7 @@ type WorkspacePricer struct {
 
 func (p *WorkspacePricer) CreditsUsedByInstance(instance *db.WorkspaceInstanceForUsage, stopTimeIfStillRunning time.Time) float64 {
 	runtime := instance.WorkspaceRuntimeSeconds(stopTimeIfStillRunning)
-	class := defaultWorkspaceClass
-	if instance.WorkspaceClass != "" {
-		class = instance.WorkspaceClass
-	}
-	return p.Credits(class, runtime)
+	return p.Credits(instance.WorkspaceClass, runtime)
 }
 
 func (p *WorkspacePricer) Credits(workspaceClass string, runtimeInSeconds int64) float64 {
@@ -52,5 +41,6 @@ func (p *WorkspacePricer) CreditsPerMinuteForClass(workspaceClass string) float6
 	if creditsForClass, ok := p.creditMinutesByWorkspaceClass[workspaceClass]; ok {
 		return creditsForClass
 	}
-	return p.creditMinutesByWorkspaceClass[defaultWorkspaceClass]
+	log.Errorf("No credit minutes configured for workspace class %q - using default price of %v credits per minute", workspaceClass, defaultPrice)
+	return defaultPrice
 }

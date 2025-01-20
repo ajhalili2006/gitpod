@@ -3,6 +3,7 @@ packages:
     type: go
     deps:
       - components/common-go:lib
+      - components/gitpod-protocol/go:lib
       - components/ide-service-api/go:lib
     srcs:
       - "**/*.go"
@@ -10,6 +11,7 @@ packages:
       - "go.sum"
       - "pkg/server/schema.json"
       - "pkg/server/testdata/**"
+      - "example-ide-config.json"
     env:
       - CGO_ENABLED=0
       - GOOS=linux
@@ -30,3 +32,8 @@ packages:
       image:
         - ${imageRepoBase}/ide-service:${version}
         - ${imageRepoBase}/ide-service:commit-${__git_commit}
+scripts:
+  - name: gen-golden-files
+    script: |
+      go test -timeout 120s -run ./... github.com/gitpod-io/gitpod/ide-service/pkg/server --force --update
+      git ls-files -- '*/**.golden' | xargs pre-commit run end-of-file-fixer --files || true

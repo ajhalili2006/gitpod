@@ -1,6 +1,6 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 const ideConfigs = [
     {
@@ -27,7 +27,29 @@ const ideConfigs = [
         name: "webstorm",
         productCode: "WS",
     },
+    {
+        name: "rider",
+        productCode: "RD",
+    },
+    {
+        name: "clion",
+        productCode: "CL",
+    },
+    {
+        name: "rustrover",
+        productCode: "RR",
+    },
 ];
+
+const getIDEVersion = function (qualifier, url) {
+    if (qualifier == "latest") {
+        return args.jbBackendVersion;
+    } else {
+        // https://download.jetbrains.com/idea/ideaIU-2022.2.4.tar.gz
+        const str = url.split("-");
+        return str[str.length - 1].replace(".tar.gz", "");
+    }
+};
 
 const packages = [];
 const generateIDEBuildPackage = function (ideConfig, qualifier) {
@@ -36,8 +58,8 @@ const generateIDEBuildPackage = function (ideConfig, qualifier) {
     let pkg = {
         name,
         type: "docker",
-        srcs: ["startup.sh", `supervisor-ide-config_${ideConfig.name}.json`],
-        deps: ["components/ide/jetbrains/image/status:app", `:download-${name}`, "components/ide/jetbrains/cli:app"],
+        srcs: ["startup.sh", `supervisor-ide-config_${name}.json`],
+        deps: [`:download-${name}`, "components/ide/jetbrains/cli:app"],
         config: {
             dockerfile: "leeway.Dockerfile",
             metadata: {
@@ -45,8 +67,9 @@ const generateIDEBuildPackage = function (ideConfig, qualifier) {
             },
             buildArgs: {
                 JETBRAINS_DOWNLOAD_QUALIFIER: name,
-                SUPERVISOR_IDE_CONFIG: `supervisor-ide-config_${ideConfig.name}.json`,
+                SUPERVISOR_IDE_CONFIG: `supervisor-ide-config_${name}.json`,
                 JETBRAINS_BACKEND_QUALIFIER: qualifier,
+                JETBRAINS_BACKEND_VERSION: getIDEVersion(qualifier, args[`${ideConfig.name}DownloadUrl`]),
             },
             image: [],
         },
@@ -72,6 +95,7 @@ const generateIDEDownloadPackage = function (ideConfig, qualifier) {
         config: {
             commands: [["./download.sh"]],
         },
+        deps: [],
     };
     if (qualifier === "stable") {
         pkg.env.push(`JETBRAINS_BACKEND_URL=${args[`${ideConfig.name}DownloadUrl`]}`);
@@ -79,6 +103,11 @@ const generateIDEDownloadPackage = function (ideConfig, qualifier) {
         let url = `https://download.jetbrains.com/product?type=release,rc,eap&distribution=linux&code=${ideConfig.productCode}`;
         if (args["buildNumber"]) {
             url = `${url}&build=${args["buildNumber"]}`;
+        } else {
+            pkg.srcs.push("resolve-latest-ide-version.sh");
+            pkg.deps.push("components/ide/jetbrains/backend-plugin:latest-info");
+            pkg.env.push("PRODUCT_CODE=" + ideConfig.productCode);
+            pkg.env.push("PARSE_URL_FROM_LATEST_INFO=true");
         }
         pkg.env.push(`JETBRAINS_BACKEND_URL=${url}`);
     }

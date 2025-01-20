@@ -1,14 +1,17 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
-// Licensed under the MIT License. See License-MIT.txt in the project root for license information.
+/// Licensed under the GNU Affero General Public License (AGPL).
+// See License.AGPL.txt in the project root for license information.
 
 package public_api_server
 
 import (
 	"fmt"
 
+	"github.com/gitpod-io/gitpod/installer/pkg/components/auth"
 	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 
 	"github.com/gitpod-io/gitpod/common-go/baseserver"
+	"github.com/gitpod-io/gitpod/common-go/kubernetes"
 
 	"github.com/gitpod-io/gitpod/installer/pkg/cluster"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
@@ -32,6 +35,8 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		return nil, err
 	}
 
+	databaseSecretVolume, databaseSecretMount, _ := common.DatabaseEnvSecret(ctx.Config)
+
 	volumes := []corev1.Volume{
 		{
 			Name: configmapVolume,
@@ -43,6 +48,8 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 				},
 			},
 		},
+		databaseSecretVolume,
+		common.CAVolume(),
 	}
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -51,6 +58,8 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 			MountPath: configMountPath,
 			SubPath:   configJSONFilename,
 		},
+		databaseSecretMount,
+		common.CAVolumeMount(),
 	}
 
 	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
@@ -64,19 +73,32 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		return nil
 	})
 
+	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
+		volume, mount, _, ok := getPersonalAccessTokenSigningKey(cfg)
+		if !ok {
+			return nil
+		}
+
+		volumes = append(volumes, volume)
+		volumeMounts = append(volumeMounts, mount)
+		return nil
+	})
+
+	authVolumes, authMounts, _ := auth.GetConfig(ctx)
+	volumes = append(volumes, authVolumes...)
+	volumeMounts = append(volumeMounts, authMounts...)
+
 	labels := common.CustomizeLabel(ctx, Component, common.TypeMetaDeployment)
+
+	imageName := ctx.ImageName(ctx.Config.Repository, Component, ctx.VersionManifest.Components.PublicAPIServer.Version)
 	return []runtime.Object{
 		&appsv1.Deployment{
 			TypeMeta: common.TypeMetaDeployment,
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      Component,
-				Namespace: ctx.Namespace,
-				Labels:    labels,
-				Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDeployment, func() map[string]string {
-					return map[string]string{
-						common.AnnotationConfigChecksum: configHash,
-					}
-				}),
+				Name:        Component,
+				Namespace:   ctx.Namespace,
+				Labels:      labels,
+				Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDeployment),
 			},
 			Spec: appsv1.DeploymentSpec{
 				Selector: &metav1.LabelSelector{MatchLabels: common.DefaultLabels(Component)},
@@ -84,22 +106,32 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 				Strategy: common.DeploymentStrategy,
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:        Component,
-						Namespace:   ctx.Namespace,
-						Labels:      labels,
-						Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDeployment),
+						Name:      Component,
+						Namespace: ctx.Namespace,
+						Labels:    labels,
+						Annotations: common.CustomizeAnnotation(ctx, Component, common.TypeMetaDeployment, func() map[string]string {
+							return map[string]string{
+								common.AnnotationConfigChecksum: configHash,
+								kubernetes.ImageNameAnnotation:  imageName,
+							}
+						}),
 					},
 					Spec: corev1.PodSpec{
-						Affinity:                      common.NodeAffinity(cluster.AffinityLabelMeta),
+						Affinity:                      cluster.WithNodeAffinityHostnameAntiAffinity(Component, cluster.AffinityLabelMeta),
+						TopologySpreadConstraints:     cluster.WithHostnameTopologySpread(Component),
 						ServiceAccountName:            Component,
 						EnableServiceLinks:            pointer.Bool(false),
-						DNSPolicy:                     "ClusterFirst",
-						RestartPolicy:                 "Always",
+						DNSPolicy:                     corev1.DNSClusterFirst,
+						RestartPolicy:                 corev1.RestartPolicyAlways,
 						TerminationGracePeriodSeconds: pointer.Int64(30),
+						InitContainers: []corev1.Container{
+							*common.DatabaseMigrationWaiterContainer(ctx),
+							*common.RedisWaiterContainer(ctx),
+						},
 						Containers: []corev1.Container{
 							{
 								Name:  Component,
-								Image: ctx.ImageName(ctx.Config.Repository, Component, ctx.VersionManifest.Components.PublicAPIServer.Version),
+								Image: imageName,
 								Args: []string{
 									"run",
 									fmt.Sprintf("--config=%s", configMountPath),
@@ -119,7 +151,8 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 									},
 								},
 								SecurityContext: &corev1.SecurityContext{
-									Privileged: pointer.Bool(false),
+									Privileged:               pointer.Bool(false),
+									AllowPrivilegeEscalation: pointer.Bool(false),
 								},
 								Env: common.CustomizeEnvvar(ctx, Component, common.MergeEnv(
 									common.DefaultEnv(&ctx.Config),
@@ -152,7 +185,7 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 								},
 								VolumeMounts: volumeMounts,
 							},
-							*common.KubeRBACProxyContainerWithConfig(ctx),
+							*common.KubeRBACProxyContainer(ctx),
 						},
 						Volumes: volumes,
 					},

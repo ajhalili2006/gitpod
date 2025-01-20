@@ -1,36 +1,67 @@
 /**
  * Copyright (c) 2020 Gitpod GmbH. All rights reserved.
  * Licensed under the GNU Affero General Public License (AGPL).
- * See License-AGPL.txt in the project root for license information.
+ * See License.AGPL.txt in the project root for license information.
  */
 
 import { GitpodHostUrl } from "@gitpod/gitpod-protocol/lib/util/gitpod-host-url";
 import { AuthProviderParams, normalizeAuthProviderParams } from "./auth/auth-provider";
 
-import { NamedWorkspaceFeatureFlag, StripeConfig } from "@gitpod/gitpod-protocol";
+import { NamedWorkspaceFeatureFlag } from "@gitpod/gitpod-protocol";
 
 import { RateLimiterConfig } from "./auth/rate-limiter";
 import { CodeSyncConfig } from "./code-sync/code-sync-service";
-import { ChargebeeProviderOptions, readOptionsFromFile } from "@gitpod/gitpod-payment-endpoint/lib/chargebee";
 import * as fs from "fs";
 import * as yaml from "js-yaml";
 import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { filePathTelepresenceAware } from "@gitpod/gitpod-protocol/lib/env";
-import { WorkspaceClasses, WorkspaceClassesConfig } from "./workspace/workspace-classes";
+import { WorkspaceClassesConfig } from "./workspace/workspace-classes";
+import { PrebuildRateLimiters } from "./workspace/prebuild-rate-limiter";
+import { IRateLimiterOptions } from "rate-limiter-flexible";
 
 export const Config = Symbol("Config");
 export type Config = Omit<
     ConfigSerialized,
-    "hostUrl" | "chargebeeProviderOptionsFile" | "stripeSecretsFile" | "stripeConfigFile" | "licenseFile"
+    "hostUrl" | "stripeSecretsFile" | "stripeConfigFile" | "linkedInSecretsFile" | "patSigningKeyFile" | "auth"
 > & {
     hostUrl: GitpodHostUrl;
     workspaceDefaults: WorkspaceDefaults;
-    chargebeeProviderOptions?: ChargebeeProviderOptions;
     stripeSecrets?: { publishableKey: string; secretKey: string };
-    stripeConfig?: StripeConfig;
+    linkedInSecrets?: { clientId: string; clientSecret: string };
     builtinAuthProvidersConfigured: boolean;
     inactivityPeriodForReposInDays?: number;
+
+    patSigningKey: string;
+    admin: {
+        loginKey?: string;
+        // Absolute file path pointing to a file which contains admin credentials, encoded as JSON.
+        credentialsPath: string;
+    };
+
+    auth: AuthConfig;
 };
+
+export interface AuthConfig {
+    // Public/Private key for signing authenticated sessions
+    pki: {
+        signing: {
+            id: string;
+            privateKey: string;
+            publicKey: string;
+        };
+        validating: {
+            id: string;
+            privateKey: string;
+            publicKey: string;
+        }[];
+    };
+
+    session: {
+        lifetimeSeconds: number;
+        issuer: string;
+        cookie: CookieConfig;
+    };
+}
 
 export interface WorkspaceDefaults {
     workspaceImage: string;
@@ -53,10 +84,10 @@ export interface WorkspaceGarbageCollection {
     /** The minimal age of a workspace before it is marked as 'softDeleted' (= hidden for the user) */
     minAgeDays: number;
 
-    /** The minimal age of a prebuild (incl. workspace) before it's content is deleted (+ marked as 'softDeleted') */
+    /** The minimal age of a prebuild (incl. workspace) before its content is deleted (+ marked as 'softDeleted') */
     minAgePrebuildDays: number;
 
-    /** The minimal number of days a workspace has to stay in 'softDeleted' before it's content is deleted */
+    /** The minimal number of days a workspace has to stay in 'softDeleted' before its content is deleted */
     contentRetentionPeriodDays: number;
 
     /** The maximum amount of workspaces whose content is deleted in one go */
@@ -78,10 +109,6 @@ export interface ConfigSerialized {
     installationShortname: string;
     devBranch?: string;
     insecureNoDomain: boolean;
-
-    // Use one or other - licenseFile reads from a file and populates license
-    license?: string;
-    licenseFile?: string;
 
     workspaceHeartbeat: {
         intervalSeconds: number;
@@ -108,6 +135,7 @@ export interface ConfigSerialized {
     definitelyGpDisabled: boolean;
 
     workspaceGarbageCollection: WorkspaceGarbageCollection;
+    completeSnapshotJob?: { disabled?: boolean };
 
     enableLocalApp: boolean;
 
@@ -124,17 +152,14 @@ export interface ConfigSerialized {
     /** maxConcurrentPrebuildsPerRef is the maximum number of prebuilds we allow per ref type at any given time */
     maxConcurrentPrebuildsPerRef: number;
 
-    incrementalPrebuilds: {
-        repositoryPasslist: string[];
-        commitHistory: number;
-    };
-
     blockNewUsers: {
         enabled: boolean;
         passlist: string[];
     };
 
-    makeNewUsersAdmin: boolean;
+    admin: {
+        credentialsPath: string;
+    };
 
     /** defaultBaseImageRegistryWhitelist is the list of registryies users get acces to by default */
     defaultBaseImageRegistryWhitelist: string[];
@@ -148,20 +173,25 @@ export interface ConfigSerialized {
 
     /**
      * The configuration for the rate limiter we (mainly) use for the websocket API
+     * @deprecated used for JSON-RPC API, for gRPC use rateLimits
      */
     rateLimiter: RateLimiterConfig;
+
+    /**
+     * The configuration for the rate limiter we use for the gRPC API.
+     * As a primary means use RateLimited decorator.
+     * Only use this if you need to adjst in production, make sure to apply changes to the decorator as well.
+     * Key is of the form `<grpc_service>/<grpc_method>`
+     */
+    rateLimits?: {
+        [key: string]: IRateLimiterOptions;
+    };
 
     /**
      * The address content service clients connect to
      * Example: content-service:8080
      */
     contentServiceAddr: string;
-
-    /**
-     * The address content service clients connect to
-     * Example: image-builder:8080
-     */
-    imageBuilderAddr: string;
 
     /**
      * The address usage service clients connect to
@@ -188,16 +218,20 @@ export interface ConfigSerialized {
     /**
      * Payment related options
      */
-    chargebeeProviderOptionsFile?: string;
     stripeSecretsFile?: string;
     stripeConfigFile?: string;
     enablePayment?: boolean;
 
     /**
-     * Number of prebuilds that can be started in the last 1 minute.
+     * LinkedIn OAuth2 configuration
+     */
+    linkedInSecretsFile?: string;
+
+    /**
+     * Number of prebuilds that can be started in a given time period.
      * Key '*' specifies the default rate limit for a cloneURL, unless overriden by a specific cloneURL.
      */
-    prebuildLimiter: { [cloneURL: string]: number } & { "*": number };
+    prebuildLimiter: PrebuildRateLimiters;
 
     /**
      * If a numeric value interpreted as days is set, repositories not beeing opened with Gitpod are
@@ -218,6 +252,47 @@ export interface ConfigSerialized {
         accountSID: string;
         authToken: string;
     };
+
+    /**
+     * File containing signing key for Personal Access Tokens
+     * This is the same signing key used by Public API
+     */
+    patSigningKeyFile?: string;
+
+    auth: {
+        pki: AuthPKIConfig;
+        session: {
+            lifetimeSeconds: number;
+            issuer: string;
+            cookie: CookieConfig;
+        };
+    };
+
+    redis: {
+        address: string;
+    };
+
+    /** true if this is a Dedicated */
+    isDedicatedInstallation: boolean;
+}
+
+export interface CookieConfig {
+    name: string;
+    maxAge: number;
+    sameSite: boolean | "lax" | "strict" | "none";
+    secure: boolean;
+    httpOnly: boolean;
+}
+
+export interface AuthPKIConfig {
+    signing: KeyPair;
+    validating?: KeyPair[];
+}
+
+export interface KeyPair {
+    id: string;
+    publicKeyPath: string;
+    privateKeyPath: string;
 }
 
 export namespace ConfigFile {
@@ -259,9 +334,7 @@ export namespace ConfigFile {
         authProviderConfigs = normalizeAuthProviderParams(authProviderConfigs);
 
         const builtinAuthProvidersConfigured = authProviderConfigs.length > 0;
-        const chargebeeProviderOptions = readOptionsFromFile(
-            filePathTelepresenceAware(config.chargebeeProviderOptionsFile || ""),
-        );
+
         let stripeSecrets: { publishableKey: string; secretKey: string } | undefined;
         if (config.enablePayment && config.stripeSecretsFile) {
             try {
@@ -272,19 +345,17 @@ export namespace ConfigFile {
                 log.error("Could not load Stripe secrets", error);
             }
         }
-        let stripeConfig: StripeConfig | undefined;
-        if (config.enablePayment && config.stripeConfigFile) {
+        let linkedInSecrets: { clientId: string; clientSecret: string } | undefined;
+        if (config.linkedInSecretsFile) {
             try {
-                stripeConfig = JSON.parse(fs.readFileSync(filePathTelepresenceAware(config.stripeConfigFile), "utf-8"));
+                linkedInSecrets = JSON.parse(
+                    fs.readFileSync(filePathTelepresenceAware(config.linkedInSecretsFile), "utf-8"),
+                );
             } catch (error) {
-                log.error("Could not load Stripe config", error);
+                log.error("Could not load LinkedIn secrets", error);
             }
         }
-        let license = config.license;
-        const licenseFile = config.licenseFile;
-        if (licenseFile) {
-            license = fs.readFileSync(filePathTelepresenceAware(licenseFile), "utf-8");
-        }
+
         let inactivityPeriodForReposInDays: number | undefined;
         if (typeof config.inactivityPeriodForReposInDays === "number") {
             if (config.inactivityPeriodForReposInDays >= 1) {
@@ -302,18 +373,44 @@ export namespace ConfigFile {
             }
         }
 
-        WorkspaceClasses.validate(config.workspaceClasses);
+        if (config.workspaceClasses.filter((c) => c.isDefault).length !== 1) {
+            log.error(
+                "Exactly one default workspace class needs to be configured: " +
+                    JSON.stringify(config.workspaceClasses),
+            );
+        }
+
+        let patSigningKey = "";
+        if (config.patSigningKeyFile) {
+            try {
+                patSigningKey = fs.readFileSync(filePathTelepresenceAware(config.patSigningKeyFile), "utf-8").trim();
+            } catch (error) {
+                log.error("Could not load Personal Access Token signing key", error);
+            }
+        }
+
+        const authPKI: Config["auth"]["pki"] = {
+            signing: {
+                id: config.auth.pki.signing.id,
+                privateKey: fs.readFileSync(filePathTelepresenceAware(config.auth.pki.signing.privateKeyPath), "utf-8"),
+                publicKey: fs.readFileSync(filePathTelepresenceAware(config.auth.pki.signing.publicKeyPath), "utf-8"),
+            },
+            validating:
+                config.auth.pki.validating?.map((keypair) => ({
+                    id: keypair.id,
+                    privateKey: fs.readFileSync(filePathTelepresenceAware(keypair.privateKeyPath), "utf-8"),
+                    publicKey: fs.readFileSync(filePathTelepresenceAware(keypair.publicKeyPath), "utf-8"),
+                })) || [],
+        };
 
         return {
             ...config,
             hostUrl,
             authProviderConfigs,
             builtinAuthProvidersConfigured,
-            chargebeeProviderOptions,
             stripeSecrets,
-            stripeConfig,
+            linkedInSecrets,
             twilioConfig,
-            license,
             workspaceGarbageCollection: {
                 ...config.workspaceGarbageCollection,
                 startDate: config.workspaceGarbageCollection.startDate
@@ -321,6 +418,15 @@ export namespace ConfigFile {
                     : Date.now(),
             },
             inactivityPeriodForReposInDays,
+            patSigningKey,
+            admin: {
+                ...config.admin,
+                credentialsPath: config.admin.credentialsPath,
+            },
+            auth: {
+                pki: authPKI,
+                session: config.auth.session,
+            },
         };
     }
 }

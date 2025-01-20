@@ -1,5 +1,6 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
-// Licensed under the MIT License. See License-MIT.txt in the project root for license information.
+/// Licensed under the GNU Affero General Public License (AGPL).
+// See License.AGPL.txt in the project root for license information.
 
 package public_api_server
 
@@ -28,7 +29,8 @@ func renderContextWithPublicAPI(t *testing.T) *common.RenderContext {
 		Experimental: &experimental.Config{
 			WebApp: &experimental.WebAppConfig{
 				PublicAPI: &experimental.PublicAPIConfig{
-					StripeSecretName: "stripe-webhook-secret",
+					StripeSecretName:                        "stripe-webhook-secret",
+					PersonalAccessTokenSigningKeySecretName: "personal-access-token-signing-key",
 				},
 			},
 		},
@@ -42,6 +44,9 @@ func renderContextWithPublicAPI(t *testing.T) *common.RenderContext {
 	}, versions.Manifest{
 		Components: versions.Components{
 			PublicAPIServer: versions.Versioned{
+				Version: "commit-test-latest",
+			},
+			ServiceWaiter: versions.Versioned{
 				Version: "commit-test-latest",
 			},
 		},

@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2021 Gitpod GmbH. All rights reserved.
  * Licensed under the GNU Affero General Public License (AGPL).
- * See License-AGPL.txt in the project root for license information.
+ * See License.AGPL.txt in the project root for license information.
  */
 
 import {
@@ -18,6 +18,7 @@ import { inject, injectable } from "inversify";
 import { EntityManager, Repository } from "typeorm";
 import { DBOAuthAuthCodeEntry } from "./entity/db-oauth-auth-code";
 import { TypeORM } from "./typeorm";
+import { log } from "@gitpod/gitpod-protocol/lib/util/logging";
 
 const expiryInFuture = new DateInterval("5m");
 
@@ -36,7 +37,9 @@ export class AuthCodeRepositoryDB implements OAuthAuthCodeRepository {
 
     public async getByIdentifier(authCodeCode: string): Promise<DBOAuthAuthCodeEntry> {
         const authCodeRepo = await this.getOauthAuthCodeRepo();
-        let authCodes = await authCodeRepo.find({ code: authCodeCode });
+        const qBuilder = authCodeRepo.createQueryBuilder("authCode").leftJoinAndSelect("authCode.user", "user");
+        qBuilder.where("authCode.code = :code", { code: authCodeCode });
+        let authCodes = await qBuilder.getMany();
         authCodes = authCodes.filter((te) => new Date(te.expiresAt).getTime() > Date.now());
         const authCode = authCodes.length > 0 ? authCodes[0] : undefined;
         if (!authCode) {
@@ -44,6 +47,7 @@ export class AuthCodeRepositoryDB implements OAuthAuthCodeRepository {
         }
         return authCode;
     }
+
     public issueAuthCode(client: OAuthClient, user: OAuthUser | undefined, scopes: OAuthScope[]): OAuthAuthCode {
         if (!user) {
             // this would otherwise break persisting of an DBOAuthAuthCodeEntry down below
@@ -66,7 +70,12 @@ export class AuthCodeRepositoryDB implements OAuthAuthCodeRepository {
             authCode.id = uuidv4();
             await authCodeRepo.save(authCode);
         } catch (error) {
-            console.error("Error while persisting an DBOAuthAuthCodeEntry.", error, { error });
+            log.error(
+                { userId: authCode.user?.id || "<not-set>" },
+                "Error while persisting an DBOAuthAuthCodeEntry.",
+                error,
+                { expiresAt: authCode.expiresAt, clientId: authCode.client.id },
+            );
         }
     }
     public async isRevoked(authCodeCode: string): Promise<boolean> {

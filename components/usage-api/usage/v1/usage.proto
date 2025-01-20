@@ -5,6 +5,7 @@ package usage.v1;
 option go_package = "github.com/gitpod-io/gitpod/usage-api/v1";
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
 
 service UsageService {
 
@@ -25,6 +26,9 @@ service UsageService {
 
     // GetBalance returns the current credits balance for the given attributionId
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse) {}
+
+    // AddUsageCreditNote adds a usage credit note to the given cost center with the effective date of now
+    rpc AddUsageCreditNote(AddUsageCreditNoteRequest) returns (AddUsageCreditNoteResponse) {}
 }
 
 message ReconcileUsageRequest {
@@ -52,6 +56,9 @@ message PaginatedResponse {
 message ListUsageRequest {
     string attribution_id = 1;
 
+    // optional user_id can be used to filter the results to only include instances created by the given user
+    string user_id = 6;
+
     // from specifies the starting time range for this request.
     // All instances which existed starting at from will be returned.
     google.protobuf.Timestamp from = 2;
@@ -72,9 +79,14 @@ message ListUsageRequest {
 
 message ListUsageResponse {
     repeated Usage usage_entries = 1;
+
     PaginatedResponse pagination = 2;
+
     // the amount of credits the given account (attributionId) has used during the requested period
     double credits_used = 3;
+
+    // ledger interval
+    google.protobuf.Duration ledger_interval = 4;
 }
 
 message Usage {
@@ -135,3 +147,15 @@ message CostCenter {
 message ResetUsageRequest {}
 
 message ResetUsageResponse {}
+
+message AddUsageCreditNoteRequest {
+    string attribution_id = 1;
+    // the amount of credits to add to the given account
+    int32 credits = 2;
+    // a human readable description for the reason this credit note exists
+    string description = 3;
+    // the id of the user (admin) who created the note
+    string user_id = 4;
+}
+
+message AddUsageCreditNoteResponse {}

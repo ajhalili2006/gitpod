@@ -1,6 +1,6 @@
 // Copyright (c) 2021 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package openvsx_proxy
 
@@ -18,6 +18,7 @@ import (
 	"github.com/gitpod-io/gitpod/common-go/baseserver"
 	"github.com/gitpod-io/gitpod/installer/pkg/cluster"
 	"github.com/gitpod-io/gitpod/installer/pkg/common"
+	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 )
 
 func statefulset(ctx *common.RenderContext) ([]runtime.Object, error) {
@@ -29,7 +30,66 @@ func statefulset(ctx *common.RenderContext) ([]runtime.Object, error) {
 		return nil, err
 	}
 
+	volumeClaimTemplates := []v1.PersistentVolumeClaim{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "redis-data",
+				Labels: common.DefaultLabels(Component),
+			},
+			Spec: v1.PersistentVolumeClaimSpec{
+				AccessModes: []v1.PersistentVolumeAccessMode{
+					v1.ReadWriteOnce,
+				},
+				Resources: v1.VolumeResourceRequirements{
+					Requests: v1.ResourceList{
+						"storage": resource.MustParse("8Gi"),
+					},
+				},
+			},
+		},
+	}
+
+	volumes := []v1.Volume{
+		{
+			Name: "config",
+			VolumeSource: v1.VolumeSource{
+				ConfigMap: &v1.ConfigMapVolumeSource{
+					LocalObjectReference: v1.LocalObjectReference{Name: fmt.Sprintf("%s-config", Component)},
+				},
+			},
+		},
+	}
+
+	if ctx.Config.OpenVSX.Proxy != nil && ctx.Config.OpenVSX.Proxy.DisablePVC {
+		volumeClaimTemplates = nil
+		volumes = append(volumes, *common.NewEmptyDirVolume("redis-data"))
+	}
+
 	const redisContainerName = "redis"
+
+	var proxyEnvVars []v1.EnvVar
+
+	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
+		proxyConfig := cfg.WebApp.ProxySettings
+		if proxyConfig != nil {
+			proxyEnvVars = []v1.EnvVar{
+				{
+					Name:  "HTTP_PROXY",
+					Value: proxyConfig.HttpProxy,
+				},
+				{
+					Name:  "HTTPS_PROXY",
+					Value: proxyConfig.HttpsProxy,
+				},
+				{
+					Name:  "NO_PROXY",
+					Value: proxyConfig.NoProxy,
+				},
+			}
+		}
+		return nil
+	})
+
 	return []runtime.Object{&appsv1.StatefulSet{
 		TypeMeta: common.TypeMetaStatefulSet,
 		ObjectMeta: metav1.ObjectMeta{
@@ -57,20 +117,13 @@ func statefulset(ctx *common.RenderContext) ([]runtime.Object, error) {
 					}),
 				},
 				Spec: v1.PodSpec{
-					Affinity:                      common.NodeAffinity(cluster.AffinityLabelIDE),
+					Affinity:                      cluster.WithNodeAffinity(cluster.AffinityLabelIDE),
 					ServiceAccountName:            Component,
 					EnableServiceLinks:            pointer.Bool(false),
-					DNSPolicy:                     "ClusterFirst",
-					RestartPolicy:                 "Always",
+					DNSPolicy:                     v1.DNSClusterFirst,
+					RestartPolicy:                 v1.RestartPolicyAlways,
 					TerminationGracePeriodSeconds: pointer.Int64(30),
-					Volumes: []v1.Volume{{
-						Name: "config",
-						VolumeSource: v1.VolumeSource{
-							ConfigMap: &v1.ConfigMapVolumeSource{
-								LocalObjectReference: v1.LocalObjectReference{Name: fmt.Sprintf("%s-config", Component)},
-							},
-						},
-					}},
+					Volumes:                       volumes,
 					Containers: []v1.Container{{
 						Name:  Component,
 						Image: ctx.ImageName(ctx.Config.Repository, Component, ctx.VersionManifest.Components.OpenVSXProxy.Version),
@@ -82,6 +135,9 @@ func statefulset(ctx *common.RenderContext) ([]runtime.Object, error) {
 									Port: intstr.IntOrString{IntVal: ContainerPort},
 								},
 							},
+						},
+						SecurityContext: &v1.SecurityContext{
+							AllowPrivilegeEscalation: pointer.Bool(false),
 						},
 						ImagePullPolicy: v1.PullIfNotPresent,
 						Resources: common.ResourceRequirements(ctx, Component, Component, v1.ResourceRequirements{
@@ -104,6 +160,7 @@ func statefulset(ctx *common.RenderContext) ([]runtime.Object, error) {
 						Env: common.CustomizeEnvvar(ctx, Component, common.MergeEnv(
 							common.DefaultEnv(&ctx.Config),
 							common.ConfigcatEnv(ctx),
+							proxyEnvVars,
 						)),
 					}, {
 						Name:  redisContainerName,
@@ -120,6 +177,9 @@ func statefulset(ctx *common.RenderContext) ([]runtime.Object, error) {
 						Ports: []v1.ContainerPort{{
 							ContainerPort: 6379,
 						}},
+						SecurityContext: &v1.SecurityContext{
+							AllowPrivilegeEscalation: pointer.Bool(false),
+						},
 						Resources: common.ResourceRequirements(ctx, Component, redisContainerName, v1.ResourceRequirements{
 							Requests: v1.ResourceList{
 								"cpu":    resource.MustParse("1m"),
@@ -137,23 +197,7 @@ func statefulset(ctx *common.RenderContext) ([]runtime.Object, error) {
 					},
 				},
 			},
-			VolumeClaimTemplates: []v1.PersistentVolumeClaim{{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "redis-data",
-					Labels: common.DefaultLabels(Component),
-				},
-				Spec: v1.PersistentVolumeClaimSpec{
-					AccessModes: []v1.PersistentVolumeAccessMode{
-						v1.ReadWriteOnce,
-					},
-					Resources: v1.ResourceRequirements{
-						Requests: v1.ResourceList{
-							"storage": resource.MustParse("8Gi"),
-						},
-					},
-				},
-			},
-			},
-		},
-	}}, nil
+			VolumeClaimTemplates: volumeClaimTemplates,
+		}},
+	}, nil
 }

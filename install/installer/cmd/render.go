@@ -1,6 +1,6 @@
 // Copyright (c) 2021 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package cmd
 
@@ -18,6 +18,7 @@ import (
 	"github.com/gitpod-io/gitpod/installer/pkg/components"
 	"github.com/gitpod-io/gitpod/installer/pkg/config"
 	configv1 "github.com/gitpod-io/gitpod/installer/pkg/config/v1"
+	"github.com/gitpod-io/gitpod/installer/pkg/config/v1/experimental"
 	"github.com/gitpod-io/gitpod/installer/pkg/postprocess"
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
@@ -174,6 +175,12 @@ func renderKubernetesObjects(cfgVersion string, cfg *configv1.Config) ([]string,
 		renderable = components.FullObjects
 		helmCharts = components.FullHelmDependencies
 	case configv1.InstallationMeta:
+		renderable = components.MetaObjects
+		helmCharts = components.MetaHelmDependencies
+	case configv1.InstallationIDE:
+		renderable = components.IDEObjects
+		helmCharts = components.IDEHelmDependencies
+	case configv1.InstallationWebApp:
 		renderable = components.WebAppObjects
 		helmCharts = components.WebAppHelmDependencies
 	case configv1.InstallationWorkspace:
@@ -224,6 +231,16 @@ func renderKubernetesObjects(cfgVersion string, cfg *configv1.Config) ([]string,
 
 	postProcessed, err := postprocess.Run(sortedObjs)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := ctx.WithExperimental(func(ucfg *experimental.Config) error {
+		postProcessed, err = postprocess.Override(ucfg.Overrides, postProcessed)
+		if err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 

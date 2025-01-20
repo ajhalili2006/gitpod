@@ -1,12 +1,13 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package cmd
 
 import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -31,6 +32,8 @@ func NewRootCmd(logger *logrus.Logger) *cobra.Command {
 		Long:  `previewctl is your best friend when interacting with Preview Environments :)`,
 	}
 
+	viper.AutomaticEnv()
+
 	cmd.PersistentFlags().StringVar(&branch, "branch", "", "From which branch's preview previewctl should interact with. By default it will use the result of \"git rev-parse --abbrev-ref HEAD\"")
 	cmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "The logger's log level")
 
@@ -39,7 +42,11 @@ func NewRootCmd(logger *logrus.Logger) *cobra.Command {
 		newGetNameCmd(),
 		newListPreviewsCmd(logger),
 		newSSHPreviewCmd(logger),
-		newGetCredentialsCommand(logger),
+		newGetCmd(logger),
+		newHasAccessCmd(logger),
+		newReportNameCmd(),
+		newCreateCmd(logger),
+		newAdminCmd(logger),
 	)
 
 	return cmd

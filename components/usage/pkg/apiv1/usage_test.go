@@ -1,6 +1,6 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package apiv1
 
@@ -12,10 +12,9 @@ import (
 	"time"
 
 	"github.com/gitpod-io/gitpod/common-go/baseserver"
-	common_db "github.com/gitpod-io/gitpod/common-go/db"
+	db "github.com/gitpod-io/gitpod/components/gitpod-db/go"
+	"github.com/gitpod-io/gitpod/components/gitpod-db/go/dbtest"
 	v1 "github.com/gitpod-io/gitpod/usage-api/v1"
-	"github.com/gitpod-io/gitpod/usage/pkg/db"
-	"github.com/gitpod-io/gitpod/usage/pkg/db/dbtest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -37,14 +36,14 @@ func TestUsageService_ReconcileUsage(t *testing.T) {
 	// stopped instances
 	instance := dbtest.NewWorkspaceInstance(t, db.WorkspaceInstance{
 		UsageAttributionID: attributionID,
-		StartedTime:        common_db.NewVarCharTime(from),
-		StoppingTime:       common_db.NewVarCharTime(to.Add(-1 * time.Minute)),
+		StartedTime:        db.NewVarCharTime(from),
+		StoppingTime:       db.NewVarCharTime(to.Add(-1 * time.Minute)),
 	})
 	dbtest.CreateWorkspaceInstances(t, dbconn, instance)
 
 	// running instances
 	dbtest.CreateWorkspaceInstances(t, dbconn, dbtest.NewWorkspaceInstance(t, db.WorkspaceInstance{
-		StartedTime:        common_db.NewVarCharTime(to.Add(-1 * time.Minute)),
+		StartedTime:        db.NewVarCharTime(to.Add(-1 * time.Minute)),
 		UsageAttributionID: attributionID,
 	}))
 
@@ -86,7 +85,11 @@ func newUsageService(t *testing.T, dbconn *gorm.DB) v1.UsageServiceClient {
 		MinForUsersOnStripe: 1000,
 	})
 
-	v1.RegisterUsageServiceServer(srv.GRPC(), NewUsageService(dbconn, DefaultWorkspacePricer, costCenterManager))
+	usageService, err := NewUsageService(dbconn, DefaultWorkspacePricer, costCenterManager, "1m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1.RegisterUsageServiceServer(srv.GRPC(), usageService)
 	baseserver.StartServerForTests(t, srv)
 
 	conn, err := grpc.Dial(srv.GRPCAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -135,7 +138,7 @@ func TestReconcile(t *testing.T) {
 			WorkspaceClass:     db.WorkspaceClass_Default,
 			Type:               db.WorkspaceType_Regular,
 			UsageAttributionID: db.NewTeamAttributionID(uuid.New().String()),
-			StartedTime:        common_db.NewVarCharTime(now.Add(1 * time.Minute)),
+			StartedTime:        db.NewVarCharTime(now.Add(1 * time.Minute)),
 		}
 
 		inserts, updates, err := reconcileUsage([]db.WorkspaceInstanceForUsage{instance, instance}, nil, pricer, now)
@@ -147,7 +150,7 @@ func TestReconcile(t *testing.T) {
 			AttributionID:       instance.UsageAttributionID,
 			Description:         usageDescriptionFromController,
 			CreditCents:         db.NewCreditCents(pricer.CreditsUsedByInstance(&instance, now)),
-			EffectiveTime:       common_db.NewVarCharTime(now),
+			EffectiveTime:       db.NewVarCharTime(now),
 			Kind:                db.WorkspaceInstanceUsageKind,
 			WorkspaceInstanceID: &instance.ID,
 			Draft:               true,
@@ -158,7 +161,7 @@ func TestReconcile(t *testing.T) {
 			WorkspaceType:  instance.Type,
 			WorkspaceClass: instance.WorkspaceClass,
 			ContextURL:     instance.ContextURL,
-			StartTime:      common_db.TimeToISO8601(instance.StartedTime.Time()),
+			StartTime:      db.TimeToISO8601(instance.StartedTime.Time()),
 			EndTime:        "",
 			UserName:       instance.UserName,
 			UserAvatarURL:  instance.UserAvatarURL,
@@ -178,17 +181,17 @@ func TestReconcile(t *testing.T) {
 			WorkspaceClass:     db.WorkspaceClass_Default,
 			Type:               db.WorkspaceType_Regular,
 			UsageAttributionID: db.NewTeamAttributionID(uuid.New().String()),
-			StartedTime:        common_db.NewVarCharTime(now.Add(1 * time.Minute)),
+			StartedTime:        db.NewVarCharTime(now.Add(1 * time.Minute)),
 		}
 
 		// the fields in the usage record deliberately do not match the instance, except for the Instance ID.
 		// we do this to test that the fields in the usage records get updated to reflect the true values from the source of truth - instances.
 		draft := dbtest.NewUsage(t, db.Usage{
 			ID:                  uuid.New(),
-			AttributionID:       db.NewUserAttributionID(uuid.New().String()),
+			AttributionID:       db.NewTeamAttributionID(uuid.New().String()),
 			Description:         "Some description",
 			CreditCents:         1,
-			EffectiveTime:       common_db.VarcharTime{},
+			EffectiveTime:       db.VarcharTime{},
 			Kind:                db.WorkspaceInstanceUsageKind,
 			WorkspaceInstanceID: &instance.ID,
 			Draft:               true,
@@ -205,7 +208,7 @@ func TestReconcile(t *testing.T) {
 			AttributionID:       instance.UsageAttributionID,
 			Description:         usageDescriptionFromController,
 			CreditCents:         db.NewCreditCents(pricer.CreditsUsedByInstance(&instance, now)),
-			EffectiveTime:       common_db.NewVarCharTime(now),
+			EffectiveTime:       db.NewVarCharTime(now),
 			Kind:                db.WorkspaceInstanceUsageKind,
 			WorkspaceInstanceID: &instance.ID,
 			Draft:               true,
@@ -216,12 +219,37 @@ func TestReconcile(t *testing.T) {
 			WorkspaceType:  instance.Type,
 			WorkspaceClass: instance.WorkspaceClass,
 			ContextURL:     instance.ContextURL,
-			StartTime:      common_db.TimeToISO8601(instance.StartedTime.Time()),
+			StartTime:      db.TimeToISO8601(instance.StartedTime.Time()),
 			EndTime:        "",
 			UserName:       instance.UserName,
 			UserAvatarURL:  instance.UserAvatarURL,
 		}))
 		require.EqualValues(t, expectedUsage, updates[0])
+	})
+
+	t.Run("handles instances without stopping but stopped time", func(t *testing.T) {
+		instance := db.WorkspaceInstanceForUsage{
+			ID:          uuid.New(),
+			WorkspaceID: dbtest.GenerateWorkspaceID(),
+			OwnerID:     uuid.New(),
+			ProjectID: sql.NullString{
+				String: "my-project",
+				Valid:  true,
+			},
+			WorkspaceClass:     db.WorkspaceClass_Default,
+			Type:               db.WorkspaceType_Regular,
+			UsageAttributionID: db.NewTeamAttributionID(uuid.New().String()),
+			StartedTime:        db.NewVarCharTime(now.Add(1 * time.Minute)),
+			StoppedTime:        db.NewVarCharTime(now.Add(2 * time.Minute)),
+		}
+
+		inserts, updates, err := reconcileUsage([]db.WorkspaceInstanceForUsage{instance}, []db.Usage{}, pricer, now)
+		require.NoError(t, err)
+		require.Len(t, inserts, 1)
+		require.Len(t, updates, 0)
+
+		require.EqualValues(t, db.NewCreditCents(0.17), inserts[0].CreditCents)
+		require.EqualValues(t, instance.StoppedTime, inserts[0].EffectiveTime)
 	})
 }
 
@@ -229,12 +257,12 @@ func TestGetAndSetCostCenter(t *testing.T) {
 	conn := dbtest.ConnectForTests(t)
 	costCenterUpdates := []*v1.CostCenter{
 		{
-			AttributionId:   string(db.NewUserAttributionID(uuid.New().String())),
+			AttributionId:   string(db.NewTeamAttributionID(uuid.New().String())),
 			SpendingLimit:   8000,
 			BillingStrategy: v1.CostCenter_BILLING_STRATEGY_STRIPE,
 		},
 		{
-			AttributionId:   string(db.NewUserAttributionID(uuid.New().String())),
+			AttributionId:   string(db.NewTeamAttributionID(uuid.New().String())),
 			SpendingLimit:   500,
 			BillingStrategy: v1.CostCenter_BILLING_STRATEGY_OTHER,
 		},
@@ -264,7 +292,6 @@ func TestGetAndSetCostCenter(t *testing.T) {
 }
 
 func TestListUsage(t *testing.T) {
-	conn := dbtest.ConnectForTests(t)
 
 	start := time.Date(2022, 7, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2022, 8, 1, 0, 0, 0, 0, time.UTC)
@@ -273,40 +300,36 @@ func TestListUsage(t *testing.T) {
 
 	draftBefore := dbtest.NewUsage(t, db.Usage{
 		AttributionID: attributionID,
-		EffectiveTime: common_db.NewVarCharTime(start.Add(-1 * 23 * time.Hour)),
+		EffectiveTime: db.NewVarCharTime(start.Add(-1 * 23 * time.Hour)),
 		CreditCents:   100,
 		Draft:         true,
 	})
 
 	nondraftBefore := dbtest.NewUsage(t, db.Usage{
 		AttributionID: attributionID,
-		EffectiveTime: common_db.NewVarCharTime(start.Add(-1 * 23 * time.Hour)),
+		EffectiveTime: db.NewVarCharTime(start.Add(-1 * 23 * time.Hour)),
 		CreditCents:   200,
 		Draft:         false,
 	})
 
 	draftInside := dbtest.NewUsage(t, db.Usage{
 		AttributionID: attributionID,
-		EffectiveTime: common_db.NewVarCharTime(start.Add(2 * time.Hour)),
+		EffectiveTime: db.NewVarCharTime(start.Add(2 * time.Hour)),
 		CreditCents:   300,
 		Draft:         true,
 	})
 	nonDraftInside := dbtest.NewUsage(t, db.Usage{
 		AttributionID: attributionID,
-		EffectiveTime: common_db.NewVarCharTime(start.Add(2 * time.Hour)),
+		EffectiveTime: db.NewVarCharTime(start.Add(2 * time.Hour)),
 		CreditCents:   400,
 		Draft:         false,
 	})
 
 	nonDraftAfter := dbtest.NewUsage(t, db.Usage{
 		AttributionID: attributionID,
-		EffectiveTime: common_db.NewVarCharTime(end.Add(2 * time.Hour)),
+		EffectiveTime: db.NewVarCharTime(end.Add(2 * time.Hour)),
 		CreditCents:   1000,
 	})
-
-	dbtest.CreateUsageRecords(t, conn, draftBefore, nondraftBefore, draftInside, nonDraftInside, nonDraftAfter)
-
-	usageService := newUsageService(t, conn)
 
 	tests := []struct {
 		start, end time.Time
@@ -322,7 +345,12 @@ func TestListUsage(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		t.Run(fmt.Sprintf("Running test no %d", i+1), func(t *testing.T) {
+		t.Run(fmt.Sprintf("test no %d", i+1), func(t *testing.T) {
+			conn := dbtest.ConnectForTests(t)
+			dbtest.CreateUsageRecords(t, conn, draftBefore, nondraftBefore, draftInside, nonDraftInside, nonDraftAfter)
+
+			usageService := newUsageService(t, conn)
+
 			metaData, err := usageService.ListUsage(context.Background(), &v1.ListUsageRequest{
 				AttributionId: string(attributionID),
 				From:          timestamppb.New(test.start),
@@ -337,6 +365,46 @@ func TestListUsage(t *testing.T) {
 
 			require.Equal(t, test.creditsUsed, metaData.CreditsUsed)
 			require.Equal(t, test.recordsInRange, metaData.Pagination.Total)
+		})
+	}
+
+}
+
+func TestAddUSageCreditNote(t *testing.T) {
+	tests := []struct {
+		credits     int32
+		userId      string
+		description string
+		// expectations
+		expectedError bool
+	}{
+		{300, uuid.New().String(), "Something", false},
+		{300, "bad-userid", "Something", true},
+		{300, uuid.New().String(), "    " /* no note */, true},
+		{-300, uuid.New().String(), "Negative Balance", false},
+	}
+
+	for i, test := range tests {
+		t.Run(fmt.Sprintf("test no %d", i+1), func(t *testing.T) {
+			attributionID := db.NewTeamAttributionID(uuid.New().String())
+			conn := dbtest.ConnectForTests(t)
+			usageService := newUsageService(t, conn)
+
+			_, err := usageService.AddUsageCreditNote(context.Background(), &v1.AddUsageCreditNoteRequest{
+				AttributionId: string(attributionID),
+				Credits:       test.credits,
+				Description:   test.description,
+				UserId:        test.userId,
+			})
+			if test.expectedError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				balance, err := db.GetBalance(context.Background(), conn, attributionID)
+				require.NoError(t, err)
+				require.Equal(t, int32(balance.ToCredits()), test.credits*-1)
+			}
+			require.NoError(t, conn.Where("attributionId = ?", attributionID).Delete(&db.Usage{}).Error)
 		})
 	}
 

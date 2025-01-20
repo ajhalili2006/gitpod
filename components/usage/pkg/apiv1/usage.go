@@ -1,6 +1,6 @@
 // Copyright (c) 2022 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package apiv1
 
@@ -8,16 +8,17 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	common_db "github.com/gitpod-io/gitpod/common-go/db"
 	"github.com/gitpod-io/gitpod/common-go/log"
+	db "github.com/gitpod-io/gitpod/components/gitpod-db/go"
 	v1 "github.com/gitpod-io/gitpod/usage-api/v1"
-	"github.com/gitpod-io/gitpod/usage/pkg/db"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"gorm.io/gorm"
 )
@@ -29,6 +30,7 @@ type UsageService struct {
 	nowFunc           func() time.Time
 	pricer            *WorkspacePricer
 	costCenterManager *db.CostCenterManager
+	ledgerInterval    time.Duration
 
 	v1.UnimplementedUsageServiceServer
 }
@@ -57,6 +59,10 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 		return nil, status.Errorf(codes.InvalidArgument, "Number of items perPage needs to be positive (was %d).", in.GetPagination().GetPerPage())
 	}
 
+	if in.GetPagination().GetPerPage() > 1000 {
+		return nil, status.Errorf(codes.InvalidArgument, "Number of items perPage needs to be no more than 1000 (was %d).", in.GetPagination().GetPerPage())
+	}
+
 	if in.GetPagination().GetPage() < 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "Page number needs to be 0 or greater (was %d).", in.GetPagination().GetPage())
 	}
@@ -81,9 +87,18 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 	}
 	var offset = perPage * (page - 1)
 
+	var userID uuid.UUID
+	if in.UserId != "" {
+		userID, err = uuid.Parse(in.UserId)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "UserID '%s' couldn't be parsed (error: %s).", in.UserId, err)
+		}
+	}
+
 	excludeDrafts := false
 	listUsageResult, err := db.FindUsage(ctx, s.conn, &db.FindUsageParams{
 		AttributionId: db.AttributionID(in.GetAttributionId()),
+		UserID:        userID,
 		From:          from,
 		To:            to,
 		Order:         order,
@@ -93,11 +108,12 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 	})
 	logger := log.Log.
 		WithField("attribution_id", in.AttributionId).
+		WithField("userID", userID).
 		WithField("perPage", perPage).
 		WithField("page", page).
 		WithField("from", from).
 		WithField("to", to)
-	logger.Info("Fetching usage data")
+	logger.Debug("Fetching usage data")
 	if err != nil {
 		logger.WithError(err).Error("Failed to fetch usage.")
 		return nil, status.Error(codes.Internal, "unable to retrieve usage")
@@ -132,6 +148,7 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 	usageSummary, err := db.GetUsageSummary(ctx, s.conn,
 		db.GetUsageSummaryParams{
 			AttributionId: attributionId,
+			UserID:        userID,
 			From:          from,
 			To:            to,
 			ExcludeDrafts: excludeDrafts,
@@ -152,9 +169,10 @@ func (s *UsageService) ListUsage(ctx context.Context, in *v1.ListUsageRequest) (
 	}
 
 	return &v1.ListUsageResponse{
-		UsageEntries: usageData,
-		CreditsUsed:  usageSummary.CreditCentsUsed.ToCredits(),
-		Pagination:   &pagination,
+		UsageEntries:   usageData,
+		CreditsUsed:    usageSummary.CreditCentsUsed.ToCredits(),
+		Pagination:     &pagination,
+		LedgerInterval: durationpb.New(s.ledgerInterval),
 	}, nil
 }
 
@@ -195,8 +213,8 @@ func dbCostCenterToAPI(c db.CostCenter) *v1.CostCenter {
 		AttributionId:     string(c.ID),
 		SpendingLimit:     c.SpendingLimit,
 		BillingStrategy:   convertBillingStrategyToAPI(c.BillingStrategy),
-		NextBillingTime:   common_db.VarcharTimeToTimestamppb(c.NextBillingTime),
-		BillingCycleStart: common_db.VarcharTimeToTimestamppb(c.BillingCycleStart),
+		NextBillingTime:   db.VarcharTimeToTimestamppb(c.NextBillingTime),
+		BillingCycleStart: db.VarcharTimeToTimestamppb(c.BillingCycleStart),
 	}
 }
 
@@ -240,7 +258,7 @@ func (s *UsageService) SetCostCenter(ctx context.Context, in *v1.SetCostCenterRe
 
 func (s *UsageService) ResetUsage(ctx context.Context, req *v1.ResetUsageRequest) (*v1.ResetUsageResponse, error) {
 	now := time.Now()
-	costCentersToUpdate, err := s.costCenterManager.ListLatestCostCentersWithBillingTimeBefore(ctx, db.CostCenter_Other, now)
+	costCentersToUpdate, err := s.costCenterManager.ListManagedCostCentersWithBillingTimeBefore(ctx, now)
 	if err != nil {
 		log.WithError(err).Error("Failed to list cost centers to update.")
 		return nil, status.Errorf(codes.Internal, "Failed to identify expired cost centers for Other billing strategy")
@@ -250,7 +268,7 @@ func (s *UsageService) ResetUsage(ctx context.Context, req *v1.ResetUsageRequest
 
 	var errors []error
 	for _, cc := range costCentersToUpdate {
-		_, err = s.costCenterManager.ResetUsage(ctx, cc)
+		_, err = s.costCenterManager.ResetUsage(ctx, cc.ID)
 		if err != nil {
 			errors = append(errors, err)
 		}
@@ -340,13 +358,13 @@ func reconcileUsage(instances []db.WorkspaceInstanceForUsage, drafts []db.Usage,
 
 	instancesByID := dedupeWorkspaceInstancesForUsage(instances)
 
-	draftsByWorkspaceID := map[uuid.UUID]db.Usage{}
+	draftsByInstanceID := map[uuid.UUID]db.Usage{}
 	for _, draft := range drafts {
-		draftsByWorkspaceID[*draft.WorkspaceInstanceID] = draft
+		draftsByInstanceID[*draft.WorkspaceInstanceID] = draft
 	}
 
 	for instanceID, instance := range instancesByID {
-		if usage, exists := draftsByWorkspaceID[instanceID]; exists {
+		if usage, exists := draftsByInstanceID[instanceID]; exists {
 			updatedUsage, err := updateUsageFromInstance(instance, usage, pricer, now)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to construct updated usage record: %w", err)
@@ -368,14 +386,19 @@ func reconcileUsage(instances []db.WorkspaceInstanceForUsage, drafts []db.Usage,
 const usageDescriptionFromController = "Usage collected by automated system."
 
 func newUsageFromInstance(instance db.WorkspaceInstanceForUsage, pricer *WorkspacePricer, now time.Time) (db.Usage, error) {
+	stopTime := instance.StoppingTime
+	if !stopTime.IsSet() {
+		stopTime = instance.StoppedTime
+	}
+
 	draft := true
-	if instance.StoppingTime.IsSet() {
+	if instance.StoppedTime.IsSet() {
 		draft = false
 	}
 
 	effectiveTime := now
-	if instance.StoppingTime.IsSet() {
-		effectiveTime = instance.StoppingTime.Time()
+	if stopTime.IsSet() {
+		effectiveTime = stopTime.Time()
 	}
 
 	usage := db.Usage{
@@ -383,27 +406,37 @@ func newUsageFromInstance(instance db.WorkspaceInstanceForUsage, pricer *Workspa
 		AttributionID:       instance.UsageAttributionID,
 		Description:         usageDescriptionFromController,
 		CreditCents:         db.NewCreditCents(pricer.CreditsUsedByInstance(&instance, now)),
-		EffectiveTime:       common_db.NewVarCharTime(effectiveTime),
+		EffectiveTime:       db.NewVarCharTime(effectiveTime),
 		Kind:                db.WorkspaceInstanceUsageKind,
 		WorkspaceInstanceID: &instance.ID,
 		Draft:               draft,
 	}
 
+	creationTime := ""
+	if instance.CreationTime.IsSet() {
+		creationTime = db.TimeToISO8601(instance.CreationTime.Time())
+	}
 	startedTime := ""
 	if instance.StartedTime.IsSet() {
-		startedTime = common_db.TimeToISO8601(instance.StartedTime.Time())
+		startedTime = db.TimeToISO8601(instance.StartedTime.Time())
 	}
 	endTime := ""
-	if instance.StoppingTime.IsSet() {
-		endTime = common_db.TimeToISO8601(instance.StoppingTime.Time())
+	if stopTime.IsSet() {
+		endTime = db.TimeToISO8601(stopTime.Time())
+	}
+	stoppedTime := ""
+	if instance.StoppedTime.IsSet() {
+		stoppedTime = db.TimeToISO8601(instance.StoppedTime.Time())
 	}
 	err := usage.SetMetadataWithWorkspaceInstance(db.WorkspaceInstanceUsageData{
 		WorkspaceId:    instance.WorkspaceID,
 		WorkspaceType:  instance.Type,
 		WorkspaceClass: instance.WorkspaceClass,
 		ContextURL:     instance.ContextURL,
+		CreationTime:   creationTime,
 		StartTime:      startedTime,
 		EndTime:        endTime,
+		StoppedTime:    stoppedTime,
 		UserID:         instance.UserID,
 		UserName:       instance.UserName,
 		UserAvatarURL:  instance.UserAvatarURL,
@@ -443,13 +476,66 @@ func dedupeWorkspaceInstancesForUsage(instances []db.WorkspaceInstanceForUsage) 
 	return set
 }
 
-func NewUsageService(conn *gorm.DB, pricer *WorkspacePricer, costCenterManager *db.CostCenterManager) *UsageService {
+func NewUsageService(conn *gorm.DB, pricer *WorkspacePricer, costCenterManager *db.CostCenterManager, ledgerIntervalStr string) (*UsageService, error) {
+
+	ledgerInterval, err := time.ParseDuration(ledgerIntervalStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse schedule duration: %w", err)
+	}
+
 	return &UsageService{
 		conn:              conn,
 		costCenterManager: costCenterManager,
 		nowFunc: func() time.Time {
 			return time.Now().UTC()
 		},
-		pricer: pricer,
+		pricer:         pricer,
+		ledgerInterval: ledgerInterval,
+	}, nil
+}
+
+func (s *UsageService) AddUsageCreditNote(ctx context.Context, req *v1.AddUsageCreditNoteRequest) (*v1.AddUsageCreditNoteResponse, error) {
+	log.Log.
+		WithField("attribution_id", req.AttributionId).
+		WithField("credits", req.Credits).
+		WithField("user", req.UserId).
+		WithField("note", req.Description).
+		Info("Adding usage credit note.")
+
+	attributionId, err := db.ParseAttributionID(req.AttributionId)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "AttributionID '%s' couldn't be parsed (error: %s).", req.AttributionId, err)
 	}
+
+	description := strings.TrimSpace(req.Description)
+	if description == "" {
+		return nil, status.Error(codes.InvalidArgument, "The description must not be empty.")
+	}
+
+	usage := db.Usage{
+		ID:            uuid.New(),
+		AttributionID: attributionId,
+		Description:   description,
+		CreditCents:   db.NewCreditCents(float64(req.Credits * -1)),
+		EffectiveTime: db.NewVarCharTime(time.Now()),
+		Kind:          db.CreditNoteKind,
+		Draft:         false,
+	}
+
+	if req.UserId != "" {
+		userId, err := uuid.Parse(req.UserId)
+		if err != nil {
+			return nil, fmt.Errorf("The user id is not a valid UUID. %w", err)
+		}
+		err = usage.SetCreditNoteMetaData(db.CreditNoteMetaData{UserID: userId.String()})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = db.InsertUsage(ctx, s.conn, usage)
+	if err != nil {
+		return nil, err
+	}
+	return &v1.AddUsageCreditNoteResponse{}, nil
 }

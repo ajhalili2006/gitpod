@@ -1,6 +1,6 @@
 // Copyright (c) 2020 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package diskguard
 
@@ -71,6 +71,7 @@ type Guard struct {
 // Start starts the disk guard
 func (g *Guard) Start() {
 	t := time.NewTicker(g.Interval)
+	defer t.Stop()
 	for {
 		bvail, err := getAvailableBytes(g.Path)
 		if err != nil {

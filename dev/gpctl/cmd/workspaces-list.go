@@ -1,6 +1,6 @@
 // Copyright (c) 2020 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
-// See License-AGPL.txt in the project root for license information.
+// See License.AGPL.txt in the project root for license information.
 
 package cmd
 
@@ -56,6 +56,10 @@ var workspacesListCmd = &cobra.Command{
 				pod = fmt.Sprintf("imagebuild-%s", w.GetId())
 			}
 
+			var nodeName string
+			if w.Runtime != nil {
+				nodeName = w.Runtime.NodeName
+			}
 			out = append(out, PrintWorkspace{
 				Owner:       w.GetMetadata().GetOwner(),
 				WorkspaceID: w.GetMetadata().GetMetaId(),
@@ -64,7 +68,7 @@ var workspacesListCmd = &cobra.Command{
 				Type:        w.GetSpec().GetType().String(),
 				Pod:         pod,
 				Active:      w.GetConditions().FirstUserActivity != nil,
-				Node:        w.Runtime.NodeName,
+				Node:        nodeName,
 			})
 		}
 
